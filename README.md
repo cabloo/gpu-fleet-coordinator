@@ -191,7 +191,7 @@ fleet/coordinator/      the optional HTTPS API in front of the registry: server,
                         certificate tooling, container entry point
 demo/                   the single-machine demo and an example job
 docs/                   the job contract, operations, and the specs
-tests/                  more than 1,400 tests; the wire protocol is also tested against a real sshd in Docker
+tests/                  more than 1,400 tests
 ```
 
 ## Tests
@@ -205,9 +205,12 @@ python -m pytest -q -m slow            # real subprocess lifecycles
 Run them from a git checkout. `tests/conftest.py` forces the queue client's local transport for
 every test, so a test can never queue into a live coordinator. Nine tests of the watcher's result
 digest need `torch` and `tensorboard`, and the capacity-schedule tests need a time-zone database
-(`pip install tzdata` where the system has none). `tests/test_docker_integration.py` drives the real
-ship, claim, run, pull, preempt and resume path against an sshd container and is skipped where
-Docker is absent.
+(`pip install tzdata` where the system has none).
+
+One test file does not pass and is opt-in: `tests/test_docker_integration.py` is meant to drive the
+real ship, claim, run, pull, preempt and resume path against an sshd container, and on a hosted
+runner its dispatcher never connects to the box. It has not been run since the development machine
+lost Docker. Until it is repaired, the demo above is the end-to-end check that runs, in CI too.
 
 ## Where this came from
 

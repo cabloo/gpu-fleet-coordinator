@@ -21,7 +21,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest pytest-rerunfailures pytest-github-actions-annotate-failures cryptography tzdata tensorboard
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - name: tests (everything but the slow ones; includes the Docker wire test)
+      - name: tests (everything but the slow ones)
         run: |
           set -o pipefail
           # Two tests assert a parallel speed-up in wall time; a shared runner can miss it once.
