@@ -52,7 +52,7 @@ volume: a site with a small data root must set them.
 
 Runtime state, not a knob (so not in `DEFAULT_SETTINGS`): `settings['data_root_guard']`, JSON
 `{"holding": bool, "at": <ISO>, "why": "free"|"registry"|"write"}`. `at` is when the current
-state began: when the hold started, or when the last one ended.
+state began: when the hold started, or when the last one ended. `why` is present only while holding.
 
 ## Output contract
 - Events: `data_root_low` (a hold begins) and `data_root_ok` (it ends), detail JSON
@@ -98,8 +98,9 @@ Module-internal to `fleet/dispatcher.py`:
    space available to its OWN user on the filesystem that holds the data root
    (`statvfs(EXPERIMENTS_ROOT)`: `f_bavail × f_frsize`, not the root-only reserve). A filesystem
    that limits inodes and has none free reads as 0, because nothing can be created on it. The read
-   goes through ONE seam, `Dispatcher.free_bytes`. A read that fails or raises is UNKNOWN: it never
-   begins a hold and never ends one. `--dry-run` does not read.
+   goes through ONE seam, `Dispatcher.free_bytes`. A read that fails or raises is UNKNOWN: by
+   itself it never begins a hold and never ends one (a hold mark of 0 still releases, invariant 2).
+   `--dry-run` does not read.
 2. **Two marks.** A hold begins when the reading is below `data_root_hold_free_gb` and ends when it
    is at or above `data_root_resume_free_gb`. Between the marks nothing changes, in either
    direction. A hold mark of 0 disables the reading-driven hold and releases one that is in force.
@@ -131,7 +132,8 @@ Module-internal to `fleet/dispatcher.py`:
    - A DONE, FAILED or PREEMPTED completion that receives it is deferred exactly as in a hold: no
      `artifact_missing`, no failure recorded without its log, no requeue from a stale checkpoint.
    - In a cycle where one was seen, the pulled-copy reapers of invariant 5 are skipped for that
-     cycle, and `local_pull_no_space` is logged once per run of such cycles.
+     cycle, and `local_pull_no_space` is logged once per run of such cycles (not while a hold is in
+     force: its own event already says so).
    - A box whose ingest raises `ENOSPC` on this machine is treated the same way.
    This is the receiving side. The pushing side has its own, older case (`REMOTE DISK FULL`, the
    BOX is out of space) and the two are not merged: one is fixed here, the other on the box.
@@ -143,7 +145,9 @@ Module-internal to `fleet/dispatcher.py`:
    exactly as before — including `ENOSPC` that names a path on another filesystem, where the
    reading would say "plenty" and the hold would begin and end every cycle. Any hold ends by
    invariant 2's rule AND only when the `data_root_ok` event itself can be written, so a registry
-   that is still full cannot flap. `--once` is unchanged: it raises.
+   that is still full cannot flap. While a hold is in force and cycles keep being abandoned, one
+   `[ALERT]` line says so at most every ten minutes; that is the only repeated output of a hold.
+   `--once` is unchanged: it raises.
 8. **Idle is unchanged.** With the reading at or above both marks and no hold in force, every
    phase runs, and the events, transitions and failure counts of a cycle are what they were before
    this feature, apart from the `data_root` key in `poll_cycle`.
@@ -161,14 +165,15 @@ Module-internal to `fleet/dispatcher.py`:
 
 ## Fixtures
 
-Each becomes a test in `tests/test_free_space_guard.py`, with a planted reading or a planted
-failure that makes the guard trip, and the matching control.
+Each becomes one or more tests in `tests/test_free_space_guard.py`, with a planted reading or a
+planted failure that makes the guard trip, and the matching control.
 
 | fixture | asserts |
 |---|---|
 | `reading_bytes_and_inodes` | `f_bavail × f_frsize`; no free inode reads 0; an unreadable path reads unknown (inv. 1) |
 | `unknown_never_holds_never_releases` | a failed reading begins nothing and ends nothing (inv. 1) |
 | `two_marks_with_a_gap` | below hold → hold; between the marks → no change either way; at resume → released; mark 0 → off (inv. 2) |
+| `resume_mark_below_hold_mark` | a resume mark set below the hold mark is read as the hold mark (Settings) |
 | `one_event_one_alert_per_edge` | many low cycles, one `data_root_low`, one push; a failed push is retried, the event is not; a restart mid-hold repeats neither (inv. 3) |
 | `hold_stops_placement_shipping_payloads` | a queued task stays queued, a claimed task is not shipped, no `tb/` or checkpoint rsync is issued; `HEARTBEAT`, `worker.jsonl` and the marker listing still are; `shipped → running` is still observed (inv. 4) |
 | `done_marker_is_deferred_then_completes` | DONE while holding: no pull, no `artifact_missing`, state unchanged; after release the same marker completes it `done` (inv. 5) |
@@ -183,6 +188,9 @@ failure that makes the guard trip, and the matching control.
 | `registry_hold_needs_a_writable_registry` | with the reading healthy but the event write still failing, the hold stays; when the write succeeds it ends, once (inv. 7) |
 | `pulled_copy_reapers_stand_down` | while holding the five pulled-copy reapers are not called and the three others are; with no hold all eight are (inv. 5) |
 | `local_enospc_in_a_box_ingest` | a box's ingest raising `ENOSPC` here counts no failure; any other exception counts one (inv. 6) |
+| `tracker_neither_counts_nor_clears` | a pull refused by our disk leaves a box's failure count where it was: it is not a failure, and not proof the box answered (inv. 6) |
+| `push_channel_that_raises` | an alert channel that raises does not end the cycle; the push is retried (inv. 3) |
+| `healthy_cycle_is_reported_complete` | `poll_survivable` returns True for a cycle that was not abandoned (inv. 7) |
 | `idle_is_unchanged` | with ample space the cycle's phases are the full set, nothing guard-related is logged, and the events of a cycle equal those of a cycle with the guard switched off (inv. 8) |
 | `reading_recorded_every_cycle` | `poll_cycle.data_root.free_gb` is the planted value; null on a failed read; `holding` true in a hold; the event's other keys are exactly the ones it had (inv. 10) |
 

@@ -316,7 +316,8 @@ the three pieces together yourself.
   budget. A preemption or a drain uses none.
 - A box that cannot receive bundles is quarantined so one bad box does not absorb the queue.
 - A `data_root_low` event, an `[ALERT]` line and one push mean the data root has less than
-  `data_root_hold_free_gb` free. The dispatcher is holding: it places nothing, ships nothing and
+  `data_root_hold_free_gb` free, or that a write to it has just failed for lack of space (the
+  event's `why` says which). The dispatcher is holding: it places nothing, ships nothing and
   pulls no results, checkpoints or TensorBoard files. Running jobs keep running, cancels still
   work, and a job that finishes waits on its box, where its files are kept for 12 hours. Free
   space (`python fleet/prune_experiments.py --apply`) and it resumes by itself at

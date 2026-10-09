@@ -1,4 +1,4 @@
-"""Free-space guard — docs/specs/free-space-guard.spec.md, one test per fixture row.
+"""Free-space guard — docs/specs/free-space-guard.spec.md, at least one test per fixture row.
 
 THE INCIDENT THIS PINS. A site's data root reached zero free bytes while the fleet was busy, and
 within one poll cycle the dispatcher:
