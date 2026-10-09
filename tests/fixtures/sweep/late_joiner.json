@@ -1,0 +1,3 @@
+{"rung": {"env_steps": 5000, "keep_fraction": 0.5},
+ "incumbents": {"a": 0.031, "b": 0.016, "c": -0.005, "d": -0.031},
+ "joiner_alive_metric": 0.020, "joiner_killed_metric": 0.005}

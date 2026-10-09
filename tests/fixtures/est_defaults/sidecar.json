@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "generated_from": "runs.sqlite",
+    "generated_task_count": 7,
+    "min_sample": 5,
+    "since": null,
+    "statistic": "ceil(p90) of done-task non-degenerate active_minutes"
+  },
+  "entrypoints": {
+    "train_p": {"est_minutes": 46, "n": 5, "actual_median": 30.0, "actual_p90": 46.0, "low_confidence": false},
+    "train_q": {"est_minutes": 24, "n": 2, "actual_median": 20.0, "actual_p90": 24.0, "low_confidence": true}
+  }
+}

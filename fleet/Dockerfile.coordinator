@@ -1,0 +1,71 @@
+# Coordinator image — the fleet-wide Vast dispatcher, packaged so a code update is an IMAGE ROLL.
+#
+# Spec: docs/specs/coordinator-container.spec.md
+#
+# WHY THE REPO IS BAKED IN rather than bind-mounted: the coordinator is also the source of WORKER
+# code. `_bring_up_worker` rsyncs four files out of ITS OWN checkout to every box
+# (spool_worker.py, sweep_supervisor.py, bundle.py, reap_orphans.py — dispatcher.py:5283), and the
+# rolling-upgrade gate keys off their fingerprint. Baking them means the image tag is the ONE
+# version number for coordinator AND worker code, so "which worker bytes are the boxes running?"
+# has a single answer (`docker inspect`) instead of "whatever the checkout happened to be at".
+# A bind-mounted checkout re-creates exactly the stale-HEAD hazard `dispatch-restart` has today.
+#
+# The coordinator NEVER COMPILES — `artifact_store` is explicit that the queuer builds ship blobs
+# and "the coordinator is BLIND ... never needs an ABI or a toolchain" (dispatcher.py:6056). So no
+# Cython, no build-essential, no torch. Python 3.12 is still pinned because it is the fleet's
+# compile ABI (`cpython-312-x86_64-linux-gnu`) and this image doubles as the QUEUER host when work
+# is queued on the server.
+FROM python:3.12-slim-bookworm
+
+# openssh-client + rsync: the entire transport to every box. git: `git archive` fallback for tasks
+# queued before code snapshots, and `git rev-parse --git-common-dir`, which is how
+# `registry_db.shared_experiments_root()` resolves EXPERIMENTS_ROOT.
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends \
+        openssh-client rsync git ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir vastai
+# The run dashboard (remote-submit M6) runs from this same image, read-only, and reads training
+# curves through TensorBoard's event reader — imported lazily, so without this the dashboard starts
+# and every curve panel 500s. Pinned to the version the dashboard was built against.
+RUN pip install --no-cache-dir tensorboard==2.21.0
+
+# Runs as a dedicated unprivileged user. UID/GID are build args because the mounted experiments
+# volume is host-owned — they MUST match the host `coord` user or every ingest write fails.
+ARG COORD_UID=1500
+ARG COORD_GID=1500
+RUN groupadd -g "${COORD_GID}" coord \
+    && useradd -m -u "${COORD_UID}" -g "${COORD_GID}" -s /bin/bash coord
+
+WORKDIR /srv/fleet
+COPY --chown=${COORD_UID}:${COORD_GID} . /srv/fleet
+
+# `experiments/` is a MOUNT POINT, never image content (.dockerignore drops it from the context).
+# Pre-created so a missing -v is a loud empty-dir failure in the entrypoint, not a silent mkdir of
+# a private in-container registry that would look healthy while orchestrating nothing.
+RUN mkdir -p /srv/fleet/experiments && chown "${COORD_UID}:${COORD_GID}" /srv/fleet/experiments
+# The API's unix socket directory (remote-submit M1). It MUST exist in the image, owned by coord: a
+# named volume is populated from the image's content at its mount point on first use, ownership
+# included — otherwise Docker creates it root:root 0755 and coord-api (uid 1500) cannot create its
+# socket, so the service dies at start with a permission error on a path nobody configured.
+RUN install -d -o "${COORD_UID}" -g "${COORD_GID}" -m 0700 /run/coord-api
+
+# Provenance: the one thing `docker inspect` must answer without a running container.
+ARG GIT_SHA=unknown
+ENV COORD_GIT_SHA=${GIT_SHA}
+LABEL org.opencontainers.image.revision=${GIT_SHA} \
+      org.opencontainers.image.title="fleet-coordinator" \
+      org.opencontainers.image.description="Fleet-wide Vast task dispatcher (home daemon)"
+
+USER coord
+
+# git refuses to operate on a tree owned by another uid; the COPY --chown above makes this a no-op
+# in the normal case, but it keeps `git rev-parse` working if UIDs are ever mismatched.
+RUN git config --global --add safe.directory /srv/fleet
+
+# tini reaps zombies. The dispatcher shells out constantly (ssh, rsync, vastai) and already had to
+# grow `killpg` handling for surviving grandchildren (dispatcher.py:2289) — PID 1 without a reaper
+# would accumulate defunct entries for the life of the container.
+ENTRYPOINT ["/usr/bin/tini", "--", "/srv/fleet/fleet/coordinator/entrypoint.sh"]
+CMD []

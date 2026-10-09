@@ -1,0 +1,19 @@
+#!/bin/sh
+# Demo stand-in for ssh: runs the "remote" command on THIS machine, in the demo box's own home.
+#
+# The dispatcher reaches every box with plain `ssh` and `rsync -e ssh`. Putting this file first on
+# PATH turns "a box" into "a directory", so the real dispatcher and the real worker can be watched
+# end to end with no ssh daemon, no second machine and no account anywhere.
+: "${DEMO_BOX_HOME:?the demo sets DEMO_BOX_HOME}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|-o|-i|-l|-F|-E|-S|-c|-m|-b|-e|-L|-R|-D|-J|-W|-w|-Q) shift 2 ;;   # options that take a value
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+[ $# -gt 0 ] || { echo "demo ssh: no host given" >&2; exit 255; }
+shift                                   # the host: there is only one, and it is here
+export HOME="$DEMO_BOX_HOME"
+cd "$HOME" || exit 255
+exec sh -c "$*"

@@ -1,0 +1,7 @@
+{
+  "cases": [
+    {"task": {"retries_used": 0, "max_retries": 3}, "expect": "requeue"},
+    {"task": {"retries_used": 2.5, "max_retries": 3}, "expect": "requeue"},
+    {"task": {"retries_used": 3.0, "max_retries": 3}, "expect": "terminal"}
+  ]
+}

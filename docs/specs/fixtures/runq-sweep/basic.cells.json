@@ -1,0 +1,45 @@
+[
+  {
+    "name": "rounds10_plan_kappa0.5",
+    "entry_args": [
+      "--set",
+      "curriculum.0.rounds=10",
+      "--set",
+      "plan_kappa=0.5"
+    ]
+  },
+  {
+    "name": "rounds10_plan_kappa2.0",
+    "entry_args": [
+      "--set",
+      "curriculum.0.rounds=10",
+      "--set",
+      "plan_kappa=2.0"
+    ]
+  },
+  {
+    "name": "rounds20_plan_kappa0.5",
+    "entry_args": [
+      "--set",
+      "curriculum.0.rounds=20",
+      "--set",
+      "plan_kappa=0.5"
+    ]
+  },
+  {
+    "name": "rounds20_plan_kappa2.0",
+    "entry_args": [
+      "--set",
+      "curriculum.0.rounds=20",
+      "--set",
+      "plan_kappa=2.0"
+    ]
+  },
+  {
+    "name": "plan_kappa4.0",
+    "entry_args": [
+      "--set",
+      "plan_kappa=4.0"
+    ]
+  }
+]

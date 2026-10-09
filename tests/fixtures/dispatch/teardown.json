@@ -1,0 +1,39 @@
+{
+  "cases": [
+    {
+      "name": "idle_past_timeout",
+      "instance": {"id": 1, "minutes_to_hard_cap": 100, "occupants": [], "idle_minutes": 12, "slots_total": 4},
+      "queued": [],
+      "expect": [true, "idle"]
+    },
+    {
+      "name": "queued_task_fits",
+      "instance": {"id": 1, "minutes_to_hard_cap": 100, "occupants": [], "idle_minutes": 12, "slots_total": 4},
+      "queued": [{"id": "q1", "slots": 1, "est_minutes": 20, "priority": 50}],
+      "expect": [false, "feasible_task_waiting"]
+    },
+    {
+      "name": "preempting_task_counts_as_open",
+      "instance": {"id": 1, "minutes_to_hard_cap": 100,
+                   "occupants": [{"id": "p1", "slots": 1, "state": "preempting"}],
+                   "idle_minutes": 12, "slots_total": 4},
+      "queued": [],
+      "expect": [false, "feasible_task_waiting"]
+    },
+    {
+      "name": "hard_cap_always_wins",
+      "instance": {"id": 1, "minutes_to_hard_cap": 0,
+                   "occupants": [{"id": "r1", "slots": 1, "state": "running"}],
+                   "idle_minutes": 0, "slots_total": 4},
+      "queued": [{"id": "q1", "slots": 1, "est_minutes": 20, "priority": 50}],
+      "expect": [true, "hard_cap"]
+    },
+    {
+      "name": "owned_box_ignores_idle_and_hard_cap",
+      "instance": {"id": -1, "source": "owned", "minutes_to_hard_cap": 0,
+                   "occupants": [], "idle_minutes": 99999, "slots_total": 1},
+      "queued": [],
+      "expect": [false, "owned_box_never_torn_down"]
+    }
+  ]
+}

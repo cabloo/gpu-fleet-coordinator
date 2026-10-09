@@ -1,0 +1,11 @@
+{
+  "db_instances": [
+    {"id": -1, "state": "live", "source": "owned"},
+    {"id": 67890, "state": "live"}
+  ],
+  "db_task_ids": ["abc"],
+  "vast_instances": [
+    {"id": 67890, "label": "runq_abc"}
+  ],
+  "expect": []
+}

@@ -1,0 +1,147 @@
+{
+  "cases": [
+    {
+      "name": "fresh_progress",
+      "task": {
+        "ckpt_mtime": 1000.0
+      },
+      "now": 1000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": false
+    },
+    {
+      "name": "just_under_timeout",
+      "task": {
+        "ckpt_mtime": 1000.0
+      },
+      "now": 6340.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": false
+    },
+    {
+      "name": "at_timeout",
+      "task": {
+        "ckpt_mtime": 1000.0
+      },
+      "now": 6400.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": true
+    },
+    {
+      "name": "never_checkpointed_and_running_since_unknown",
+      "task": {
+        "ckpt_mtime": null
+      },
+      "now": 100000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": false
+    },
+    {
+      "name": "never_checkpointed_but_running_since_fresh",
+      "task": {
+        "ckpt_mtime": null,
+        "running_since": 6880.0
+      },
+      "now": 7000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": false
+    },
+    {
+      "name": "never_checkpointed_and_running_since_stale",
+      "task": {
+        "ckpt_mtime": null,
+        "running_since": 1000.0
+      },
+      "now": 7000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": true
+    },
+    {
+      "name": "retry_fresh_start_not_stalled",
+      "task": {
+        "ckpt_mtime": 1000.0,
+        "running_since": 6880.0
+      },
+      "now": 7000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": false
+    },
+    {
+      "name": "stalled_after_restart",
+      "task": {
+        "ckpt_mtime": 1000.0,
+        "running_since": 1000.0
+      },
+      "now": 7000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": true
+    },
+    {
+      "name": "ckpt_newer_than_restart_wins",
+      "task": {
+        "ckpt_mtime": 6880.0,
+        "running_since": 1000.0
+      },
+      "now": 7000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": false
+    },
+    {
+      "name": "tb_fresh_no_checkpoint_not_stalled",
+      "task": {
+        "ckpt_mtime": null,
+        "tb_mtime": 6880.0,
+        "running_since": 1000.0
+      },
+      "now": 7000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": false
+    },
+    {
+      "name": "tb_stale_and_no_checkpoint_stalls",
+      "task": {
+        "ckpt_mtime": null,
+        "tb_mtime": 1000.0,
+        "running_since": 1000.0
+      },
+      "now": 7000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": true
+    },
+    {
+      "name": "tb_newer_than_stale_checkpoint_wins",
+      "task": {
+        "ckpt_mtime": 1000.0,
+        "tb_mtime": 6880.0,
+        "running_since": 1000.0
+      },
+      "now": 7000.0,
+      "settings": {
+        "stall_timeout_min": 90
+      },
+      "expect": false
+    }
+  ]
+}

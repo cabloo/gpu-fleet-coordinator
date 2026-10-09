@@ -1,0 +1,6 @@
+{
+  "_meta": {"min_sample": 5},
+  "entrypoints": {
+    "train_p": {"est_minutes": "oops", "n": 5}
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "task": {"id": "T", "slots": 1, "est_minutes": 60, "priority": 50},
+  "instances": [
+    {"id": 30, "state": "live", "slots_total": 2, "dph_usd": 0.10, "minutes_to_hard_cap": 6000,
+     "occupants": []},
+    {"id": 40, "state": "live", "slots_total": 2, "dph_usd": 0.05, "minutes_to_hard_cap": 6000,
+     "occupants": []}
+  ],
+  "queue": [],
+  "offers": [],
+  "_note": "Two idle paid boxes, identical free slots, so the task extends both by its full window -> cost is dph-proportional. The cheaper box (40, $0.05) wins over the pricier one (30, $0.10).",
+  "expect": {"action": "pack", "target": 40, "reason_contains": "pack on instance 40"}
+}

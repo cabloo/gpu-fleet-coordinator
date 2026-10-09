@@ -1,0 +1,195 @@
+{
+  "_comment": "Invariant 21 golden traces for consolidation_drains. Occupant running_minutes_ago is picked so remaining = est*1.25 - ran is well clear of consolidate_min_remaining_min (30) unless a case is testing the near-done guard. expect = normalized [[instance_id, [sorted task_ids], [sorted targets]], ...], most-expensive-first.",
+  "cases": [
+    {
+      "name": "drain_worst_paid_onto_owned",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 6,
+         "vram_total_gb": 12.0, "vram_used_gb": 1.5,
+         "occupants": [{"id": "bb1", "slots": 1, "state": "running", "est_minutes": 360, "running_minutes_ago": 30},
+                        {"id": "bb2", "slots": 1, "state": "running", "est_minutes": 360, "running_minutes_ago": 30}]},
+        {"id": 40000009, "state": "live", "dph_usd": 0.076, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 5.0,
+         "occupants": [{"id": "tower", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": [[40000009, ["tower"], [-1]]]
+    },
+    {
+      "name": "near_done_task_left_to_finish",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 6,
+         "vram_total_gb": 12.0, "vram_used_gb": 1.5, "occupants": []},
+        {"id": 2, "state": "live", "dph_usd": 0.06, "source": "vast", "slots_total": 1,
+         "vram_total_gb": 11.0, "vram_used_gb": 3.0,
+         "occupants": [{"id": "nd", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 590}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "overdue_task_is_drain_eligible",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 6,
+         "vram_total_gb": 12.0, "vram_used_gb": 1.5, "occupants": []},
+        {"id": 2, "state": "live", "dph_usd": 0.06, "source": "vast", "slots_total": 1,
+         "vram_total_gb": 11.0, "vram_used_gb": 3.0,
+         "occupants": [{"id": "ov", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 900}]}
+      ],
+      "expect": [[2, ["ov"], [-1]]]
+    },
+    {
+      "name": "no_cheaper_free_slots_holds",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 2,
+         "vram_total_gb": 12.0, "vram_used_gb": 2.0,
+         "occupants": [{"id": "a", "slots": 1, "state": "running", "est_minutes": 360, "running_minutes_ago": 30},
+                        {"id": "b", "slots": 1, "state": "running", "est_minutes": 360, "running_minutes_ago": 30}]},
+        {"id": 3, "state": "live", "dph_usd": 0.076, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 5.0,
+         "occupants": [{"id": "t", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "vram_gate_blocks_oom",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 6,
+         "vram_total_gb": 6.0, "vram_used_gb": 5.0,
+         "occupants": [{"id": "a", "slots": 1, "state": "running", "est_minutes": 360, "running_minutes_ago": 30}]},
+        {"id": 3, "state": "live", "dph_usd": 0.076, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 5.0,
+         "occupants": [{"id": "t", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "vram_unmeasured_falls_back_to_slot_count",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 6,
+         "vram_total_gb": null, "vram_used_gb": null,
+         "occupants": [{"id": "a", "slots": 1, "state": "running", "est_minutes": 360, "running_minutes_ago": 30}]},
+        {"id": 3, "state": "live", "dph_usd": 0.076, "source": "vast", "slots_total": 4,
+         "vram_total_gb": null, "vram_used_gb": null,
+         "occupants": [{"id": "t", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": [[3, ["t"], [-1]]]
+    },
+    {
+      "name": "preempting_occupant_means_drain_in_flight",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 6,
+         "vram_total_gb": 12.0, "vram_used_gb": 1.5, "occupants": []},
+        {"id": 3, "state": "live", "dph_usd": 0.06, "source": "vast", "slots_total": 1,
+         "vram_total_gb": 11.0, "vram_used_gb": 3.0,
+         "occupants": [{"id": "x", "slots": 1, "state": "preempting", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "most_expensive_vacated_when_owned_has_room_for_one",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 4,
+         "vram_total_gb": 12.0, "vram_used_gb": 2.0,
+         "occupants": [{"id": "a", "slots": 1, "state": "running", "est_minutes": 360, "running_minutes_ago": 30},
+                        {"id": "b", "slots": 1, "state": "running", "est_minutes": 360, "running_minutes_ago": 30},
+                        {"id": "c", "slots": 1, "state": "running", "est_minutes": 360, "running_minutes_ago": 30}]},
+        {"id": 10, "state": "live", "dph_usd": 0.08, "source": "vast", "slots_total": 1,
+         "vram_total_gb": 11.0, "vram_used_gb": 3.0,
+         "occupants": [{"id": "hi", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]},
+        {"id": 11, "state": "live", "dph_usd": 0.05, "source": "vast", "slots_total": 1,
+         "vram_total_gb": 11.0, "vram_used_gb": 3.0,
+         "occupants": [{"id": "lo", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": [[10, ["hi"], [-1]]]
+    },
+    {
+      "name": "vacate_onto_cheaper_paid_box",
+      "instances": [
+        {"id": 20, "state": "live", "dph_usd": 0.03, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 2.0,
+         "occupants": [{"id": "c1", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]},
+        {"id": 21, "state": "live", "dph_usd": 0.09, "source": "vast", "slots_total": 1,
+         "vram_total_gb": 11.0, "vram_used_gb": 2.0,
+         "occupants": [{"id": "e1", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": [[21, ["e1"], [20]]]
+    },
+    {
+      "name": "no_other_capacity_at_all_holds",
+      "instances": [
+        {"id": 21, "state": "live", "dph_usd": 0.09, "source": "vast", "slots_total": 1,
+         "vram_total_gb": 11.0, "vram_used_gb": 2.0,
+         "occupants": [{"id": "e1", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "collapse_two_equal_priced_half_full_boxes",
+      "instances": [
+        {"id": 1, "state": "live", "dph_usd": 0.05, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 3.0,
+         "occupants": [{"id": "a1", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100},
+                        {"id": "a2", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]},
+        {"id": 2, "state": "live", "dph_usd": 0.05, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 3.0,
+         "occupants": [{"id": "b1", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100},
+                        {"id": "b2", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": [[1, ["a1", "a2"], [2]]]
+    },
+    {
+      "name": "collapse_kills_the_more_expensive_box",
+      "instances": [
+        {"id": 1, "state": "live", "dph_usd": 0.09, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 2.0,
+         "occupants": [{"id": "h1", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]},
+        {"id": 2, "state": "live", "dph_usd": 0.05, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 2.0,
+         "occupants": [{"id": "l1", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": [[1, ["h1"], [2]]]
+    },
+    {
+      "name": "empty_paid_box_is_never_a_relocation_target",
+      "instances": [
+        {"id": 1, "state": "live", "dph_usd": 0.08, "source": "vast", "slots_total": 1,
+         "vram_total_gb": 11.0, "vram_used_gb": 2.0,
+         "occupants": [{"id": "f1", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]},
+        {"id": 2, "state": "live", "dph_usd": 0.03, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 0.0, "occupants": []}
+      ],
+      "expect": []
+    },
+    {
+      "name": "disabled_setting_holds",
+      "settings_overrides": {"consolidate_enabled": false},
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 6,
+         "vram_total_gb": 12.0, "vram_used_gb": 1.5, "occupants": []},
+        {"id": 3, "state": "live", "dph_usd": 0.076, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 5.0,
+         "occupants": [{"id": "t", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "owned_box_is_never_a_source",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 6,
+         "vram_total_gb": 12.0, "vram_used_gb": 1.5,
+         "occupants": [{"id": "o1", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "paused_source_box_ignored",
+      "instances": [
+        {"id": -1, "state": "live", "dph_usd": 0.0, "source": "owned", "slots_total": 6,
+         "vram_total_gb": 12.0, "vram_used_gb": 1.5, "occupants": []},
+        {"id": 3, "state": "paused", "dph_usd": 0.076, "source": "vast", "slots_total": 4,
+         "vram_total_gb": 11.0, "vram_used_gb": 5.0,
+         "occupants": [{"id": "t", "slots": 1, "state": "running", "est_minutes": 480, "running_minutes_ago": 100}]}
+      ],
+      "expect": []
+    }
+  ]
+}

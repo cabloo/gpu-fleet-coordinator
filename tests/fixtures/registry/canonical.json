@@ -1,0 +1,14 @@
+{
+  "cfg": {
+    "seed": 3,
+    "train_ratio": 1,
+    "world_model": {"deter": 256, "lr": 0.0003},
+    "run": {"out_dir": "/tmp/x", "name": "tr1"}
+  },
+  "exclude": ["run.out_dir", "run.name"],
+  "seed_paths": ["seed"],
+  "canonical": "{\"seed\":3,\"train_ratio\":1,\"world_model\":{\"deter\":256,\"lr\":0.0003}}",
+  "config_hash": "57d6dbe210d09c26",
+  "arm_canonical": "{\"train_ratio\":1,\"world_model\":{\"deter\":256,\"lr\":0.0003}}",
+  "arm_hash": "557b4ae023746c06"
+}

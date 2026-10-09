@@ -1,0 +1,12 @@
+{
+  "task": {"id": "T", "slots": 1, "est_minutes": 60, "priority": 50},
+  "instances": [
+    {"id": 1, "state": "live", "slots_total": 4, "minutes_to_hard_cap": 300,
+     "occupants": [{"id": "a1", "slots": 2, "state": "claimed"}]},
+    {"id": 2, "state": "live", "slots_total": 4, "minutes_to_hard_cap": 300,
+     "occupants": [{"id": "b1", "slots": 1, "state": "claimed"}]}
+  ],
+  "queue": [],
+  "offers": [],
+  "expect": {"action": "pack", "target": 1, "reason_contains": "85"}
+}

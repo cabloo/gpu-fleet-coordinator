@@ -1,0 +1,7 @@
+# the data root: registry, snapshots, pulled results
+experiments/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/

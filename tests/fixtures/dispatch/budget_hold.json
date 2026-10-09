@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "name": "budget_hold",
+      "task": {"id": "T", "slots": 1, "est_minutes": 60, "priority": 50},
+      "instances": [
+        {"id": 1, "state": "live", "slots_total": 1, "minutes_to_hard_cap": 300,
+         "occupants": [{"id": "x1", "slots": 1, "state": "claimed"}]}
+      ],
+      "queue": [
+        {"id": "q1", "slots": 1, "est_minutes": 20, "priority": 50},
+        {"id": "q2", "slots": 1, "est_minutes": 20, "priority": 50},
+        {"id": "q3", "slots": 1, "est_minutes": 20, "priority": 50}
+      ],
+      "offers": [{"id": 1, "dph_total": 0.30, "machine_id": 1, "gpu_ram_gb": 16, "cpu_cores_effective": 8}],
+      "settings_overrides": {"current_rate": 0.72, "current_balance": 25.0},
+      "expect": {"action": "hold", "reason_contains": "budget"}
+    },
+    {
+      "name": "pack_ignores_budget",
+      "task": {"id": "T", "slots": 1, "est_minutes": 60, "priority": 50},
+      "instances": [
+        {"id": 1, "state": "live", "slots_total": 2, "minutes_to_hard_cap": 300,
+         "occupants": [{"id": "x1", "slots": 1, "state": "claimed"}]}
+      ],
+      "queue": [],
+      "offers": [{"id": 1, "dph_total": 0.30, "machine_id": 1, "gpu_ram_gb": 16, "cpu_cores_effective": 8}],
+      "settings_overrides": {"current_rate": 0.72, "current_balance": 25.0},
+      "expect": {"action": "pack", "target": 1}
+    }
+  ]
+}

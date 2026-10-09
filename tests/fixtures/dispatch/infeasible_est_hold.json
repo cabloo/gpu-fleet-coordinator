@@ -1,0 +1,12 @@
+{
+  "task": {"id": "T-inf", "slots": 1, "est_minutes": 480, "priority": 50},
+  "instances": [
+    {"id": 1, "state": "live", "slots_total": 4, "minutes_to_hard_cap": 540,
+     "occupants": []}
+  ],
+  "queue": [],
+  "offers": [{"id": 9, "dph_total": 0.25, "machine_id": 123, "gpu_ram_gb": 12.0,
+              "cpu_cores_effective": 8.0}],
+  "settings_overrides": {"hard_cap_hours": 9},
+  "expect": {"action": "hold", "reason_contains": "infeasible_est"}
+}

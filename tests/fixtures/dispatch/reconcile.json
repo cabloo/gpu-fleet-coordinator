@@ -1,0 +1,19 @@
+{
+  "db_instances": [
+    {"id": 12345, "state": "live"},
+    {"id": 67890, "state": "live"}
+  ],
+  "db_task_ids": ["abc", "abc2"],
+  "vast_instances": [
+    {"id": 12345, "label": "runq_abc"},
+    {"id": 99999, "label": ""},
+    {"id": 55555, "label": "runq_abc2"},
+    {"id": 44444, "label": "runq_zzz"}
+  ],
+  "expect": [
+    {"type": "lost", "instance_id": 67890},
+    {"type": "foreign_instance", "instance_id": 99999},
+    {"type": "adopt", "instance_id": 55555},
+    {"type": "foreign_instance", "instance_id": 44444}
+  ]
+}

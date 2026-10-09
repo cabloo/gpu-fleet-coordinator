@@ -1,0 +1,18 @@
+{
+  "db_instances": [
+    {"id": 111, "state": "provisioning", "created_at": "2026-07-09T00:00:00Z"},
+    {"id": 222, "state": "provisioning", "created_at": "2026-07-09T00:40:00Z"},
+    {"id": 333, "state": "live", "created_at": "2026-07-09T00:00:00Z"}
+  ],
+  "vast_instances": [
+    {"id": 111, "label": "runq_x"},
+    {"id": 222, "label": "runq_y"},
+    {"id": 333, "label": "runq_z"}
+  ],
+  "db_task_ids": [],
+  "now": "2026-07-09T01:00:00Z",
+  "provision_timeout_min": 45,
+  "expect": [
+    {"type": "stuck_provisioning", "instance_id": 111}
+  ]
+}

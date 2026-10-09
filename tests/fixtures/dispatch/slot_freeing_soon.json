@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "name": "freeing_soon_holds",
+      "task": {"id": "T", "slots": 1, "est_minutes": 20, "priority": 50},
+      "instances": [
+        {"id": 1, "state": "live", "slots_total": 1, "minutes_to_hard_cap": 300,
+         "occupants": [{"id": "r1", "slots": 1, "state": "running", "est_minutes": 60,
+                        "priority": 50, "running_minutes_ago": 68}]}
+      ],
+      "queue": [],
+      "offers": [],
+      "expect": {"action": "hold", "reason_contains": "slot_freeing_soon"}
+    },
+    {
+      "name": "not_soon_enough_falls_through",
+      "task": {"id": "T", "slots": 1, "est_minutes": 20, "priority": 50},
+      "instances": [
+        {"id": 1, "state": "live", "slots_total": 1, "minutes_to_hard_cap": 300,
+         "occupants": [{"id": "r1", "slots": 1, "state": "running", "est_minutes": 60,
+                        "priority": 50, "running_minutes_ago": 20}]}
+      ],
+      "queue": [],
+      "offers": [],
+      "expect": {"action": "hold", "reason_contains": "backlog_too_small"}
+    }
+  ]
+}

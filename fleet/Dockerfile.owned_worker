@@ -1,0 +1,38 @@
+# GPU worker image for an OWNED home box (desktop/laptop) joined to the fleet as a free worker.
+#
+# Mirrors a rented Vast box so the coordinator reaches it identically (root@host over ssh, pushes
+# spool_worker.py to ~/spool_bin, ships per-task code bundles, pulls checkpoints): the exact pytorch
+# runtime image the fleet targets (BOX_IMAGE, Python 3.12 = the compile ABI) + sshd + rsync/git.
+# Nothing repo-specific is baked in — the coordinator ships the code per task.
+#
+# Build + run (on the desktop's WSL/Docker host — see docs/operations.md "Add a machine you own"). Use --network=host: WSL2's default bridge build-network often can't egress to the apt
+# mirrors (DNS resolves but the connection drops — an MTU/bridge issue); the host network works.
+#   docker build --network=host -f fleet/Dockerfile.owned_worker -t fleet-owned-worker .
+#   printf '%s\n' "<coordinator's ssh PUBLIC key>" > ~/.fleet-worker.authorized_keys
+#   docker run -d --restart unless-stopped --gpus all --name fleet-desktop-worker \
+#     -p 2222:22 -v ~/.fleet-worker.authorized_keys:/root/.ssh/authorized_keys:ro \
+#     fleet-owned-worker
+# then register from the coordinator:
+#   python fleet/register_owned_box.py --label desktop-<gpu> --host 172.17.0.1 --port 2222 \
+#     --slots <N> --gpu-name "<GPU>"
+# BASE_IMAGE: same torch + py3.12 as the fleet, built for a CUDA that has kernels for THIS card. The
+# default cu126 wheel carries sm_50..sm_90 only — on a Blackwell card (RTX 50xx, sm_120) cuBLAS still
+# runs but every torch elementwise/reduction/autograd kernel dies with "no kernel image"
+# (gpudesktop, 2026-09-25). owned_box_setup.sh passes the cuda13.0 variant for compute cap >= 10.
+ARG BASE_IMAGE=pytorch/pytorch:2.12.1-cuda12.6-cudnn9-runtime
+FROM ${BASE_IMAGE}
+
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends openssh-server rsync git \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /root/.ssh \
+    && chmod 700 /root/.ssh \
+    && sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
+    && sed -i 's/#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
+    && sed -i 's/#\?StrictModes.*/StrictModes no/' /etc/ssh/sshd_config
+# StrictModes off (line above): authorized_keys is bind-mounted from the host so it's owned by the
+# host user, not root — StrictModes would reject it. Pubkey auth itself is unchanged.
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Demo stand-in for the Vast.ai CLI: the demo never rents anything, and must not be able to.
+echo "demo vastai: no cloud account in the demo ($*)" >&2
+exit 97

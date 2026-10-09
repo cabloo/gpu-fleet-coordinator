@@ -1,0 +1,127 @@
+{
+ "cases": [
+  {
+   "name": "big_box_capped",
+   "offer": {
+    "gpu_ram_gb": 24,
+    "cpu_cores_effective": 32
+   },
+   "resource_hint": null,
+   "expect_slots": 8
+  },
+  {
+   "name": "small_box_at_cap",
+   "offer": {
+    "gpu_ram_gb": 8,
+    "cpu_cores_effective": 8
+   },
+   "resource_hint": null,
+   "expect_slots": 8
+  },
+  {
+   "name": "cpu_bound_task_class",
+   "offer": {
+    "gpu_ram_gb": 16,
+    "cpu_cores_effective": 16
+   },
+   "resource_hint": {
+    "vram_per_lane_gb": 2,
+    "cores_per_lane": 16
+   },
+   "expect_slots": 1
+  },
+  {
+   "name": "cpu_sliver_cannot_fit_one_lane",
+   "offer": {
+    "gpu_ram_gb": 12,
+    "cpu_cores_effective": 1.71
+   },
+   "resource_hint": {
+    "vram_per_lane_gb": 2,
+    "cores_per_lane": 4
+   },
+   "expect_slots": 0
+  },
+  {
+   "name": "vram_sliver_cannot_fit_one_lane",
+   "offer": {
+    "gpu_ram_gb": 1,
+    "cpu_cores_effective": 8
+   },
+   "resource_hint": {
+    "vram_per_lane_gb": 2,
+    "cores_per_lane": 1
+   },
+   "expect_slots": 0
+  },
+  {
+   "name": "ram_abstains_when_the_offer_does_not_say",
+   "offer": {
+    "gpu_ram_gb": 24,
+    "cpu_cores_effective": 32
+   },
+   "resource_hint": {
+    "vram_per_lane_gb": 1,
+    "cores_per_lane": 1,
+    "ram_per_lane_gb": 99
+   },
+   "expect_slots": 8
+  },
+  {
+   "name": "ram_binds_below_vram_and_cores",
+   "offer": {
+    "gpu_ram_gb": 24,
+    "cpu_cores_effective": 32,
+    "ram_gb": 8.0
+   },
+   "resource_hint": {
+    "vram_per_lane_gb": 1,
+    "cores_per_lane": 1,
+    "ram_per_lane_gb": 2.34
+   },
+   "expect_slots": 3
+  },
+  {
+   "name": "the_40000042_incident_ram_starved_box_is_not_bookable_for_8_lanes",
+   "offer": {
+    "gpu_ram_gb": 8.0,
+    "cpu_cores_effective": 16.0,
+    "ram_gb": 5.92
+   },
+   "resource_hint": {
+    "vram_per_lane_gb": 0.25,
+    "cores_per_lane": 1.3,
+    "ram_per_lane_gb": 2.34
+   },
+   "expect_slots": 2
+  },
+  {
+   "name": "ram_zero_abstains_rather_than_denying_every_lane",
+   "offer": {
+    "gpu_ram_gb": 12,
+    "cpu_cores_effective": 12,
+    "ram_gb": 0
+   },
+   "resource_hint": {
+    "vram_per_lane_gb": 1,
+    "cores_per_lane": 1,
+    "ram_per_lane_gb": 2
+   },
+   "expect_slots": 8
+  },
+  {
+   "name": "ram_rich_box_reaches_the_cap_at_depth_16",
+   "offer": {
+    "gpu_ram_gb": 12,
+    "cpu_cores_effective": 24,
+    "ram_gb": 50.2
+   },
+   "resource_hint": {
+    "vram_per_lane_gb": 0.25,
+    "cores_per_lane": 1.3,
+    "ram_per_lane_gb": 2.34
+   },
+   "expect_slots": 8
+  }
+ ]
+}

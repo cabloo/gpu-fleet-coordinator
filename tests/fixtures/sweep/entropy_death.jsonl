@@ -1,0 +1,4 @@
+{"env_steps": 2500, "det_norm": 0.0, "ac_entropy": 0.31, "phase": "learn"}
+{"env_steps": 5000, "det_norm": 0.0, "ac_entropy": 0.05, "phase": "learn"}
+{"env_steps": 10000, "det_norm": 0.0, "ac_entropy": 0.010, "phase": "learn"}
+{"env_steps": 12500, "det_norm": 0.0, "ac_entropy": 0.008, "phase": "learn"}

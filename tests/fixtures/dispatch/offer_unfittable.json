@@ -1,0 +1,50 @@
+{
+  "cases": [
+    {
+      "name": "cheapest_unfittable_skipped",
+      "task": {"id": "T", "slots": 7, "est_minutes": 240, "priority": 50,
+               "resource_hint": {"vram_per_lane_gb": 3.0, "cores_per_lane": 2}},
+      "instances": [],
+      "queue": [],
+      "offers": [
+        {"id": 1, "dph_total": 0.05, "machine_id": 100, "gpu_ram_gb": 6, "cpu_cores_effective": 8},
+        {"id": 2, "dph_total": 0.22, "machine_id": 200, "gpu_ram_gb": 24, "cpu_cores_effective": 16}
+      ],
+      "expect": {"action": "rent", "offer_dph": 0.22, "offer_machine": 200}
+    },
+    {
+      "name": "all_unfittable_holds_no_offer",
+      "task": {"id": "T", "slots": 7, "est_minutes": 240, "priority": 50,
+               "resource_hint": {"vram_per_lane_gb": 3.0, "cores_per_lane": 2}},
+      "instances": [],
+      "queue": [],
+      "offers": [
+        {"id": 1, "dph_total": 0.05, "machine_id": 100, "gpu_ram_gb": 6, "cpu_cores_effective": 8}
+      ],
+      "expect": {"action": "hold", "reason_contains": "no_offer"}
+    },
+    {
+      "name": "sliver_cannot_fit_one_lane_holds",
+      "task": {"id": "T", "slots": 1, "est_minutes": 240, "priority": 50,
+               "resource_hint": {"vram_per_lane_gb": 2.0, "cores_per_lane": 4}},
+      "instances": [],
+      "queue": [],
+      "offers": [
+        {"id": 9, "dph_total": 0.0547, "machine_id": 10002, "gpu_ram_gb": 12, "cpu_cores_effective": 1.71}
+      ],
+      "expect": {"action": "hold", "reason_contains": "no_offer"}
+    },
+    {
+      "name": "sliver_skipped_for_fitting_box",
+      "task": {"id": "T", "slots": 1, "est_minutes": 240, "priority": 50,
+               "resource_hint": {"vram_per_lane_gb": 2.0, "cores_per_lane": 4}},
+      "instances": [],
+      "queue": [],
+      "offers": [
+        {"id": 9, "dph_total": 0.0547, "machine_id": 10002, "gpu_ram_gb": 12, "cpu_cores_effective": 1.71},
+        {"id": 2, "dph_total": 0.0481, "machine_id": 100003, "gpu_ram_gb": 12, "cpu_cores_effective": 20}
+      ],
+      "expect": {"action": "rent", "offer_dph": 0.0481, "offer_machine": 100003}
+    }
+  ]
+}

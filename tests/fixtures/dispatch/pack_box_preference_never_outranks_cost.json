@@ -1,0 +1,13 @@
+{
+  "_doc": "Invariant 4b': the preference sits AFTER marginal cost, never before it — so it can never make the fleet spend money. Instance 10 is a PAID box (dph 0.50) that this task would fully extend, carrying a large preference; instance -1 is a $0 owned box with no preference. Cost must still win outright: the free box takes it. If the preference ever outranked cost, this fixture flips to 10 and the fleet starts paying for a hand-set knob.",
+  "task": {"id": "T", "slots": 1, "est_minutes": 60, "priority": 50},
+  "instances": [
+    {"id": 10, "state": "live", "slots_total": 4, "minutes_to_hard_cap": 300, "dph_usd": 0.50,
+     "pack_preference": 99, "occupants": []},
+    {"id": -1, "state": "live", "slots_total": 4, "minutes_to_hard_cap": 300, "dph_usd": 0.0,
+     "occupants": []}
+  ],
+  "queue": [],
+  "offers": [],
+  "expect": {"action": "pack", "target": -1}
+}

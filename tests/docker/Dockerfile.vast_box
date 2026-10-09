@@ -1,0 +1,20 @@
+# Stand-in for a rented Vast.ai box (docs/specs/task-dispatcher.spec.md): sshd + rsync +
+# python3, nothing else. Real boxes come with a full pytorch image; the docker integration test
+# only exercises the dispatcher/spool_worker plumbing (ship/claim/run/pull/preempt/teardown)
+# against the `smoke` entrypoint, which is deliberately stdlib-only — no torch needed here.
+FROM python:3.11-slim
+
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends openssh-server rsync git \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /root/.ssh \
+    && chmod 700 /root/.ssh
+
+# Root login is how every existing launch script in this repo already operates against real
+# Vast boxes (`root@$HOST`) — matched here, not a new security posture.
+RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]

@@ -1,0 +1,14 @@
+{
+  "_doc": "Invariant 4b': an operator PACK PREFERENCE outranks tightest-fit among boxes of equal cost. Instance -3 is a wholly IDLE owned box (4 free slots) carrying preference 1; instance -1 is an owned box already holding work (1 free slot). Both are $0, so cost ties and the OLD sort would take -1 on tightest-fit — which is the defect: the emptier a free box is, the later it gets packed, so a newly added idle box is picked last forever. With the preference set, -3 wins.",
+  "task": {"id": "T", "slots": 1, "est_minutes": 60, "priority": 50},
+  "instances": [
+    {"id": -1, "state": "live", "slots_total": 4, "minutes_to_hard_cap": 300, "dph_usd": 0.0,
+     "occupants": [{"id": "a1", "slots": 3, "state": "running", "est_minutes": 60,
+                    "running_minutes_ago": 5}]},
+    {"id": -3, "state": "live", "slots_total": 4, "minutes_to_hard_cap": 300, "dph_usd": 0.0,
+     "pack_preference": 1, "occupants": []}
+  ],
+  "queue": [],
+  "offers": [],
+  "expect": {"action": "pack", "target": -3, "reason_contains": "[preference 1]"}
+}

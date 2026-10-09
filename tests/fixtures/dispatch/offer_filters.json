@@ -1,0 +1,12 @@
+{
+  "task": {"id": "T", "slots": 1, "est_minutes": 60, "priority": 50},
+  "instances": [],
+  "queue": [],
+  "offers": [
+    {"id": 1, "dph_total": 0.55, "machine_id": 100, "gpu_ram_gb": 16, "cpu_cores_effective": 8},
+    {"id": 2, "dph_total": 0.32, "machine_id": 555, "gpu_ram_gb": 16, "cpu_cores_effective": 8},
+    {"id": 3, "dph_total": 0.38, "machine_id": 77, "gpu_ram_gb": 16, "cpu_cores_effective": 8}
+  ],
+  "settings_overrides": {"current_rate": 0.0, "current_balance": 25.0, "deny_machine_ids": [555]},
+  "expect": {"action": "rent", "offer_dph": 0.38, "offer_machine": 77}
+}

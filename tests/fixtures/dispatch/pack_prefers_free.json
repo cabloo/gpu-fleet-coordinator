@@ -1,0 +1,13 @@
+{
+  "task": {"id": "T", "slots": 1, "est_minutes": 60, "priority": 50},
+  "instances": [
+    {"id": 5, "state": "live", "slots_total": 2, "dph_usd": 0.05, "minutes_to_hard_cap": 600,
+     "occupants": [{"id": "p1", "slots": 1, "state": "running", "est_minutes": 30, "running_minutes_ago": 0}]},
+    {"id": -1, "state": "live", "slots_total": 6, "dph_usd": 0.0, "minutes_to_hard_cap": 6000,
+     "occupants": []}
+  ],
+  "queue": [],
+  "offers": [],
+  "_note": "Free owned box -1 (6 free slots) beats the tighter-fit paid box 5 (1 free): tightest-fit alone would pick 5, but 5 costs $ (task window 85 > its occupant's 37.5 remaining) while -1 is $0. Cost wins over fragmentation.",
+  "expect": {"action": "pack", "target": -1, "reason_contains": "$0.0000"}
+}

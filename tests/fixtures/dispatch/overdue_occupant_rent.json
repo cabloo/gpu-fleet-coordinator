@@ -1,0 +1,29 @@
+{
+  "_doc": "Invariant 4c overdue-exclusion (2026-07-15): a running occupant overdue by MORE than rent_patience_min has an expired estimate — it must NOT count as 'freeing soon', or a full fleet of chronically-overdue long-runs holds a real backlog forever instead of renting. A slightly-overdue occupant (within patience) is still likely about to finish, so it keeps holding.",
+  "cases": [
+    {
+      "name": "overdue_beyond_patience_rents_not_holds",
+      "task": {"id": "T", "slots": 1, "est_minutes": 120, "priority": 50},
+      "instances": [
+        {"id": 1, "state": "live", "slots_total": 1, "minutes_to_hard_cap": 3000,
+         "occupants": [{"id": "long", "slots": 1, "state": "running", "est_minutes": 20,
+                        "priority": 50, "running_minutes_ago": 1291}]}
+      ],
+      "queue": [],
+      "offers": [{"dph_total": 0.25, "machine_id": 1, "gpu_ram_gb": 24, "cpu_cores_effective": 16}],
+      "expect": {"action": "rent", "offer_dph": 0.25}
+    },
+    {
+      "name": "overdue_within_patience_still_holds",
+      "task": {"id": "T", "slots": 1, "est_minutes": 20, "priority": 50},
+      "instances": [
+        {"id": 1, "state": "live", "slots_total": 1, "minutes_to_hard_cap": 300,
+         "occupants": [{"id": "almost", "slots": 1, "state": "running", "est_minutes": 20,
+                        "priority": 50, "running_minutes_ago": 30}]}
+      ],
+      "queue": [],
+      "offers": [{"dph_total": 0.25, "machine_id": 1, "gpu_ram_gb": 24, "cpu_cores_effective": 16}],
+      "expect": {"action": "hold", "reason_contains": "slot_freeing_soon"}
+    }
+  ]
+}

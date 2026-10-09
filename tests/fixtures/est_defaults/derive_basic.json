@@ -1,0 +1,23 @@
+{
+  "_meta": {
+    "generated_task_count": 7,
+    "min_sample": 5,
+    "statistic": "ceil(p90) of done-task non-degenerate active_minutes"
+  },
+  "entrypoints": {
+    "train_a": {
+      "actual_median": 30.0,
+      "actual_p90": 46.0,
+      "est_minutes": 46,
+      "low_confidence": false,
+      "n": 5
+    },
+    "train_b": {
+      "actual_median": 20.0,
+      "actual_p90": 24.0,
+      "est_minutes": 24,
+      "low_confidence": true,
+      "n": 2
+    }
+  }
+}

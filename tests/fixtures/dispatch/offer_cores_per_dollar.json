@@ -1,0 +1,44 @@
+{
+  "cases": [
+    {
+      "name": "core_rich_box_wins_even_on_empty_queue",
+      "note": "the 2026-07-21 fix: cores-per-$ has no demand term, so the 20-core box beats the cheaper 6-core box even with NO backlog — the case the old demand-capped $/slot rule got wrong (it picked the cheaper box).",
+      "task": {"id": "T", "slots": 1, "est_minutes": 240, "priority": 50,
+               "resource_hint": {"vram_per_lane_gb": 2.0, "cores_per_lane": 4}},
+      "instances": [],
+      "queue": [],
+      "offers": [
+        {"id": 1, "dph_total": 0.0412, "machine_id": 10001, "gpu_ram_gb": 8, "cpu_cores_effective": 6},
+        {"id": 2, "dph_total": 0.0481, "machine_id": 100003, "gpu_ram_gb": 12, "cpu_cores_effective": 20}
+      ],
+      "expect": {"action": "rent", "offer_machine": 100003,
+                 "reason_contains": "dph_per_lane=0.0096"}
+    },
+    {
+      "name": "cheaper_and_denser_box_wins",
+      "task": {"id": "T", "slots": 1, "est_minutes": 240, "priority": 50,
+               "resource_hint": {"vram_per_lane_gb": 2.0, "cores_per_lane": 4}},
+      "instances": [],
+      "queue": [],
+      "offers": [
+        {"id": 1, "dph_total": 0.0481, "machine_id": 100003, "gpu_ram_gb": 12, "cpu_cores_effective": 20},
+        {"id": 2, "dph_total": 0.0600, "machine_id": 10001, "gpu_ram_gb": 8, "cpu_cores_effective": 6}
+      ],
+      "expect": {"action": "rent", "offer_machine": 100003,
+                 "reason_contains": "dph_per_lane=0.0096"}
+    },
+    {
+      "name": "equal_density_breaks_to_cheaper_dph",
+      "task": {"id": "T", "slots": 1, "est_minutes": 240, "priority": 50,
+               "resource_hint": {"vram_per_lane_gb": 2.0, "cores_per_lane": 4}},
+      "instances": [],
+      "queue": [],
+      "offers": [
+        {"id": 1, "dph_total": 0.0500, "machine_id": 100, "gpu_ram_gb": 12, "cpu_cores_effective": 8},
+        {"id": 2, "dph_total": 0.0480, "machine_id": 200, "gpu_ram_gb": 12, "cpu_cores_effective": 8}
+      ],
+      "expect": {"action": "rent", "offer_machine": 200,
+                 "reason_contains": "dph_per_lane=0.0240"}
+    }
+  ]
+}

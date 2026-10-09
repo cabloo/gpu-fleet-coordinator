@@ -1,0 +1,146 @@
+{
+  "generated_from": {
+    "db": "DB",
+    "task_count": 5,
+    "since": null,
+    "group": null,
+    "entrypoint": null,
+    "skipped_malformed": 0
+  },
+  "runtime": {
+    "overall": {
+      "n": 4,
+      "excluded_degenerate": 1,
+      "ratio_median": 0.8,
+      "ratio_mean": 1.0,
+      "ratio_p10": 0.46,
+      "ratio_p90": 1.7
+    },
+    "by_entrypoint": [
+      {
+        "entrypoint": "train_x",
+        "n": 4,
+        "excluded_degenerate": 0,
+        "est_minutes_median": 80.0,
+        "actual_minutes_median": 60.0,
+        "ratio_median": 0.8,
+        "under_est_count": 1,
+        "over_est_count": 3
+      },
+      {
+        "entrypoint": "train_y",
+        "n": 0,
+        "excluded_degenerate": 1,
+        "est_minutes_median": null,
+        "actual_minutes_median": null,
+        "ratio_median": null,
+        "under_est_count": 0,
+        "over_est_count": 0
+      }
+    ]
+  },
+  "cost": {
+    "realized_total_usd": 0.65,
+    "attributed_usd": 0.6,
+    "unattributed_idle_usd": 0.05,
+    "idle_fraction": 0.0769,
+    "cost_per_done_task_usd": 0.15,
+    "by_group": [
+      {
+        "grp": "gA",
+        "done": 3,
+        "attributed_usd": 0.204,
+        "usd_per_done_task": 0.068
+      },
+      {
+        "grp": "gB",
+        "done": 1,
+        "attributed_usd": 0.2376,
+        "usd_per_done_task": 0.2376
+      },
+      {
+        "grp": "gC",
+        "done": 0,
+        "attributed_usd": 0.1584,
+        "usd_per_done_task": null
+      }
+    ]
+  },
+  "packing": {
+    "fleet_occupancy": 0.5683,
+    "boxes": 3,
+    "by_offer_class": [
+      {
+        "gpu_name": "RTX 3060",
+        "slots_total": 1,
+        "boxes": 2,
+        "occupancy_mean": 0.5,
+        "dph_usd_median": 0.1
+      },
+      {
+        "gpu_name": "RTX 3060",
+        "slots_total": 2,
+        "boxes": 1,
+        "occupancy_mean": 0.4208,
+        "dph_usd_median": 0.2
+      }
+    ]
+  },
+  "packing_diagnosis": {
+    "boxes": 3,
+    "boxes_ran": 2,
+    "boxes_never_ran": 1,
+    "rent_time_field": "created_at",
+    "idle_slot_minutes": 199.0,
+    "idle_partition": {
+      "over_provision": 0.603,
+      "never_shipped": 0.3015,
+      "under_pack": 0.0955
+    },
+    "by_reason": [
+      {
+        "reason": "over_provisioned",
+        "boxes": 1,
+        "cost_usd": 0.4
+      },
+      {
+        "reason": "healthy",
+        "boxes": 1,
+        "cost_usd": 0.2
+      },
+      {
+        "reason": "never_ran",
+        "boxes": 1,
+        "cost_usd": 0.05
+      }
+    ],
+    "by_offer_class": [
+      {
+        "gpu_name": "RTX 3060",
+        "slots_total": 1,
+        "boxes": 2,
+        "occupancy_mean": 0.5,
+        "backlog_slots_at_rent_median": 1.0,
+        "boxes_never_ran": 1,
+        "verdict": "never_ran"
+      },
+      {
+        "gpu_name": "RTX 3060",
+        "slots_total": 2,
+        "boxes": 1,
+        "occupancy_mean": 0.4208,
+        "backlog_slots_at_rent_median": 1,
+        "boxes_never_ran": 0,
+        "verdict": "over_provisioned"
+      }
+    ]
+  },
+  "offers": {
+    "rents_total": 0,
+    "rents_with_offer_data": 0,
+    "premium_paid_rents": 0,
+    "premium_dph_median": null,
+    "premium_dph_total": 0,
+    "by_reason": []
+  }
+}

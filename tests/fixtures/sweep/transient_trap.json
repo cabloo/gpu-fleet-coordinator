@@ -1,0 +1,10 @@
+{"rung": {"env_steps": 15000, "keep_fraction": 0.5},
+ "lanes": {
+  "transient": [
+   {"env_steps": 5000, "det_norm": 0.047, "ac_entropy": 0.3, "phase": "learn"},
+   {"env_steps": 10000, "det_norm": 0.005, "ac_entropy": 0.3, "phase": "learn"},
+   {"env_steps": 15000, "det_norm": 0.000, "ac_entropy": 0.3, "phase": "learn"}],
+  "steady": [
+   {"env_steps": 5000, "det_norm": 0.021, "ac_entropy": 0.3, "phase": "learn"},
+   {"env_steps": 10000, "det_norm": 0.021, "ac_entropy": 0.3, "phase": "learn"},
+   {"env_steps": 15000, "det_norm": 0.021, "ac_entropy": 0.3, "phase": "learn"}]}}

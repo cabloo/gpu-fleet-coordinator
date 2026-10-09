@@ -1,0 +1,18 @@
+{
+  "as_of": "2026-10-08",
+  "first_task": "2026-07-08",
+  "tasks_queued": 11243,
+  "completed": 8794,
+  "cancelled": 1718,
+  "failed_in_the_job": 711,
+  "gave_up_after_infrastructure_retries": 12,
+  "requeued_after_an_infrastructure_failure": 573,
+  "ran_on_more_than_one_machine": 481,
+  "stopped_as_stalled": 233,
+  "rental_boxes_drained_onto_owned_machines": 119,
+  "owned_machines": 4,
+  "rented_machines": 922,
+  "completed_on_owned_machines": 6689,
+  "completed_on_rentals": 2105,
+  "rented_machines_that_never_completed_a_task": 573
+}

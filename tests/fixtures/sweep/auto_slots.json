@@ -1,0 +1,13 @@
+{"cases": [
+ {"name": "vram_bound", "hw": {"gpu_util": 50, "vram_free_gb": 1.0, "vram_total_gb": 8.0, "load1": 2.0, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 1.2, "n_live": 2, "since_launch_min": 10, "expect": [false, "vram"]},
+ {"name": "util_bound", "hw": {"gpu_util": 95, "vram_free_gb": 6.0, "vram_total_gb": 8.0, "load1": 2.0, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 1.2, "n_live": 2, "since_launch_min": 10, "expect": [false, "gpu_util"]},
+ {"name": "clear", "hw": {"gpu_util": 40, "vram_free_gb": 6.0, "vram_total_gb": 8.0, "load1": 2.0, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 1.2, "n_live": 2, "since_launch_min": 10, "expect": [true, "headroom"]},
+ {"name": "no_smi", "hw": {"gpu_util": null, "vram_free_gb": null, "vram_total_gb": null, "load1": 2.0, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": null, "n_live": 3, "since_launch_min": 10, "expect": [true, "headroom"]},
+ {"name": "max_slots", "hw": {"gpu_util": 40, "vram_free_gb": 6.0, "vram_total_gb": 8.0, "load1": 2.0, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 1.2, "n_live": 8, "since_launch_min": 10, "expect": [false, "max_slots"]},
+ {"name": "settling_but_idle_launches", "hw": {"gpu_util": 40, "vram_free_gb": 6.0, "vram_total_gb": 8.0, "load1": 2.0, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 1.2, "n_live": 2, "since_launch_min": 1, "expect": [true, "headroom"]},
+ {"name": "progress_guarantee", "hw": {"gpu_util": 99, "vram_free_gb": 0.1, "vram_total_gb": 8.0, "load1": 15.9, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 5.0, "n_live": 0, "since_launch_min": 0, "expect": [true, "first lane"]},
+ {"name": "settling_busy_box_still_settles", "hw": {"gpu_util": 40, "vram_free_gb": 6.0, "vram_total_gb": 8.0, "load1": 9.0, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 1.2, "n_live": 2, "since_launch_min": 1, "expect": [false, "settling"]},
+ {"name": "settling_inside_floor_still_settles", "hw": {"gpu_util": 40, "vram_free_gb": 6.0, "vram_total_gb": 8.0, "load1": 2.0, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 1.2, "n_live": 2, "since_launch_min": 0.2, "expect": [false, "settling"]},
+ {"name": "settling_idle_at_floor_launches", "hw": {"gpu_util": 40, "vram_free_gb": 6.0, "vram_total_gb": 8.0, "load1": 2.0, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 1.2, "n_live": 2, "since_launch_min": 0.5, "expect": [true, "headroom"]},
+ {"name": "idle_bypass_never_beats_cpu_guard", "hw": {"gpu_util": 40, "vram_free_gb": 6.0, "vram_total_gb": 8.0, "load1": 15.5, "cores": 16, "proc_vram_gb": {}}, "vram_per_lane_max": 1.2, "n_live": 2, "since_launch_min": 10, "expect": [false, "cpu_load"]}
+]}

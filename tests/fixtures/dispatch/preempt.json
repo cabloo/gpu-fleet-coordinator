@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "name": "eligible_victim",
+      "task": {"id": "T", "slots": 1, "est_minutes": 20, "priority": 80},
+      "instances": [
+        {"id": 1, "state": "live", "slots_total": 1, "minutes_to_hard_cap": 300,
+         "occupants": [{"id": "v1", "slots": 1, "state": "running", "est_minutes": 60,
+                        "priority": 40, "running_minutes_ago": 5}]}
+      ],
+      "queue": [],
+      "offers": [],
+      "settings_overrides": {"current_rate": 0.0, "current_balance": 25.0},
+      "expect": {"action": "preempt", "target": 1, "victims": ["v1"]}
+    },
+    {
+      "name": "gap_too_small_falls_through",
+      "task": {"id": "T", "slots": 1, "est_minutes": 20, "priority": 80},
+      "instances": [
+        {"id": 1, "state": "live", "slots_total": 1, "minutes_to_hard_cap": 300,
+         "occupants": [{"id": "v1", "slots": 1, "state": "running", "est_minutes": 60,
+                        "priority": 55, "running_minutes_ago": 20}]}
+      ],
+      "queue": [],
+      "offers": [{"id": 1, "dph_total": 0.20, "machine_id": 1, "gpu_ram_gb": 16, "cpu_cores_effective": 8}],
+      "settings_overrides": {"current_rate": 0.0, "current_balance": 25.0},
+      "expect": {"action": "rent", "offer_dph": 0.20}
+    },
+    {
+      "name": "relief_already_in_flight_holds_instead_of_rerenting",
+      "task": {"id": "T", "slots": 1, "est_minutes": 20, "priority": 90},
+      "instances": [
+        {"id": 1, "state": "live", "slots_total": 1, "minutes_to_hard_cap": 300,
+         "occupants": [{"id": "v1", "slots": 1, "state": "preempting"}]}
+      ],
+      "queue": [],
+      "offers": [{"id": 1, "dph_total": 0.20, "machine_id": 1, "gpu_ram_gb": 16, "cpu_cores_effective": 8}],
+      "settings_overrides": {"current_rate": 0.0, "current_balance": 25.0},
+      "expect": {"action": "hold", "reason_contains": "preempt_wait"}
+    }
+  ]
+}

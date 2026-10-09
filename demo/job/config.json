@@ -1,0 +1,13 @@
+{
+  "seed": 0,
+  "steps": 12,
+  "sleep_per_step": 0.5,
+  "ckpt_every": 3,
+  "job": {
+    "manifest_version": 1,
+    "run": ["python", "train.py"],
+    "completion_artifact": "results.json",
+    "resume": {"flag": "--init-from", "checkpoint": "ckpt_latest.pt"},
+    "resources": {"est_minutes": 3}
+  }
+}

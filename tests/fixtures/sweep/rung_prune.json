@@ -1,0 +1,6 @@
+{"rung": {"env_steps": 5000, "keep_fraction": 0.5},
+ "lanes": {
+  "a": [{"env_steps": 5000, "det_norm": 0.031, "ac_entropy": 0.3, "phase": "learn"}],
+  "b": [{"env_steps": 5000, "det_norm": 0.016, "ac_entropy": 0.3, "phase": "learn"}],
+  "c": [{"env_steps": 5000, "det_norm": -0.005, "ac_entropy": 0.3, "phase": "learn"}],
+  "d": [{"env_steps": 5000, "det_norm": -0.031, "ac_entropy": 0.3, "phase": "learn"}]}}

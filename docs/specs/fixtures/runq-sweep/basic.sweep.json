@@ -1,0 +1,20 @@
+{
+  "sweep_version": 1,
+  "config": "configs/demo.json",
+  "group": "demo",
+  "axes": {
+    "plan_kappa": [
+      0.5,
+      2.0
+    ],
+    "curriculum.0.rounds": [
+      10,
+      20
+    ]
+  },
+  "cells": [
+    {
+      "plan_kappa": 4.0
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "task": {"id": "T", "slots": 1, "est_minutes": 60, "priority": 50},
+  "instances": [
+    {"id": 10, "state": "live", "slots_total": 4, "dph_usd": 0.05, "minutes_to_hard_cap": 6000,
+     "occupants": [{"id": "long", "slots": 1, "state": "running", "est_minutes": 1000, "running_minutes_ago": 0}]},
+    {"id": 20, "state": "live", "slots_total": 2, "dph_usd": 0.05, "minutes_to_hard_cap": 6000,
+     "occupants": [{"id": "short", "slots": 1, "state": "running", "est_minutes": 5, "running_minutes_ago": 0}]}
+  ],
+  "queue": [],
+  "offers": [],
+  "_note": "Two same-dph paid boxes. Box 10 has a long occupant (1000min) that keeps it alive far past the task's 85min window -> the task rides for $0 marginal. Box 20's occupant (5min) finishes first, so the task would EXTEND box 20 -> costs $. Cost picks 10 even though 20 is the tighter fit (1 free vs 3 free).",
+  "expect": {"action": "pack", "target": 10, "reason_contains": "$0.0000"}
+}

@@ -1,0 +1,11 @@
+{
+  "ssh_fallback_fails": 3,
+  "instance_id": 1,
+  "sequence": [
+    {"ok": false, "expect_switch": false, "expect_direct_after": false},
+    {"ok": false, "expect_switch": false, "expect_direct_after": false},
+    {"ok": false, "expect_switch": true, "expect_direct_after": true},
+    {"ok": false, "expect_switch": false, "expect_direct_after": true},
+    {"ok": true, "expect_switch": false, "expect_direct_after": true}
+  ]
+}
