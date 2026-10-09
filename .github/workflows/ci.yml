@@ -19,12 +19,35 @@ jobs:
       - name: install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest cryptography tzdata tensorboard
+          pip install pytest pytest-github-actions-annotate-failures cryptography tzdata tensorboard
           pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: tests (everything but the slow ones; includes the Docker wire test)
-        run: python -m pytest -q -m "not slow"
+        run: |
+          set -o pipefail
+          python -m pytest -q -m "not slow" -rfE 2>&1 | tee not-slow.log
       - name: slow tests (real subprocess lifecycles, a real compile)
-        run: python -m pytest -q -m slow
+        if: always()
+        run: |
+          set -o pipefail
+          python -m pytest -q -m slow -rfE 2>&1 | tee slow.log
+      # Job logs need a login even on a public repository; annotations do not. Name what failed.
+      - name: name the failing tests
+        if: failure()
+        run: |
+          python - <<'EOF'
+          import pathlib, re
+          for log in ("not-slow.log", "slow.log"):
+              p = pathlib.Path(log)
+              if not p.exists():
+                  continue
+              text = p.read_text(errors="replace")
+              failed = re.findall(r"^(?:FAILED|ERROR) (\S+)(?: - (.*))?$", text, re.M)
+              lines = [f"{test} :: {(why or '')[:200]}" for test, why in failed[:80]]
+              tail = text.strip().splitlines()[-1] if text.strip() else ""
+              body = "\n".join(lines + [tail]) or "no FAILED lines"
+              body = body.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=failing tests in {log} ({len(failed)})::{body}")
+          EOF
 
   demo:
     runs-on: ubuntu-latest
