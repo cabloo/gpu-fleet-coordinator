@@ -47,10 +47,14 @@ so a declare-at-queue-time policy would be defensively applied to everything and
 | code snapshots **are** trivially recreatable | 1121/1123 `git_sha` still reachable; `git archive <sha>` in seconds — and they are **already** GC'd at 72 h |
 
 ## Where it runs
-**Desktop-side, on demand. This feature is NOT wired into the dispatcher's periodic loop** and adds
-no coordinator state (operator decision, 2026-08-09: "keep everything on this desktop, not on the
-coordinator"). It is a standalone CLI plus a `make prune` target, run by a human against the shared
-experiments root. Invariant 12 below is what makes that safe to run while the fleet is live.
+**On demand, or on a site's own timer. This feature is NOT wired into the dispatcher's periodic
+loop** and adds no coordinator state (operator decision, 2026-08-09: "keep everything on this
+desktop, not on the coordinator"). It is a standalone CLI plus a `make prune` target, run by a human
+against the shared experiments root — or by a site on a timer, in a service beside the coordinator
+that runs the same command with `--apply`. The second form exists because the first was not enough:
+a data root nobody pruned for three weeks filled and took the fleet down with it (the incident in
+`free-space-guard.spec.md`, which covers what the dispatcher does when retention has not run).
+Invariant 12 below is what makes either form safe while the fleet is live.
 
 ## Input contract
 - **CLI (trust boundary):**

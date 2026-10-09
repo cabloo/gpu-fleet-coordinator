@@ -224,7 +224,8 @@ When a setting takes effect depends on who reads it:
 
 - the dispatcher reads most settings once, at start: restart it after a change;
 - `bundle_compile` and its companions are read by `runq` each time it queues;
-- `launch_gate`, the worker-roll limits and per-box rows are read on every pass.
+- `launch_gate`, the worker-roll limits, the two data-root marks and per-box rows are read on
+  every pass.
 
 **Eight settings are reset at start if they hold a default that was later replaced**, because the
 dispatcher cannot tell an old default from your choice of the same value. Writing the left-hand
@@ -258,6 +259,7 @@ The defaults, with the measurement behind each, are `DEFAULT_SETTINGS` at the to
 | `checkpoint_pull_every_min` | 5 | how often a running task's checkpoint is pulled home |
 | `stall_timeout_min` | 90 | silence after which a running task is stopped as stalled |
 | `poll_seconds` | 30 | pause between dispatcher passes |
+| `data_root_hold_free_gb`, `data_root_resume_free_gb` | 5, 10 | the dispatcher holds while less than the first is free on the data root's filesystem and resumes at the second; 0 for the first turns the hold off |
 
 ## Environment
 
@@ -313,5 +315,12 @@ the three pieces together yourself.
   `infra_failed` is retried from the last checkpoint; each requeue uses half a retry of the task's
   budget. A preemption or a drain uses none.
 - A box that cannot receive bundles is quarantined so one bad box does not absorb the queue.
+- A `data_root_low` event, an `[ALERT]` line and one push mean the data root has less than
+  `data_root_hold_free_gb` free. The dispatcher is holding: it places nothing, ships nothing and
+  pulls no results, checkpoints or TensorBoard files. Running jobs keep running, cancels still
+  work, and a job that finishes waits on its box, where its files are kept for 12 hours. Free
+  space (`python fleet/prune_experiments.py --apply`) and it resumes by itself at
+  `data_root_resume_free_gb`, logging `data_root_ok`. The free space it reads is in every
+  `poll_cycle` event, under `data_root.free_gb`.
 - Do not run tests in a shell that has the API variables set unless `tests/conftest.py` is in
   place: it is what stops a test from queueing into a live fleet.

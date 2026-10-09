@@ -1,4 +1,6 @@
 """Suite-wide safety: no test may reach a live coordinator."""
+import sys
+
 import pytest
 
 
@@ -19,6 +21,26 @@ def _never_queue_into_production(monkeypatch):
     monkeypatch.setenv("RUNQ_TRANSPORT", "local")
     for var in ("COORD_API_URL", "COORD_API_CA", "COORD_API_CERT", "COORD_API_KEY"):
         monkeypatch.delenv(var, raising=False)
+
+
+# --------------------------------------------------------------------------------------------------
+# The suite does not depend on how full THIS machine's disk is (free-space-guard spec).
+# --------------------------------------------------------------------------------------------------
+# The dispatcher reads the real free space of its data root at the top of every poll cycle, and a
+# test's data root is a temp directory. On a machine with a nearly full temp filesystem every test
+# that runs a cycle would find itself in a HOLD — nothing placed, nothing shipped — and fail for a
+# reason that has nothing to do with what it tests. So the default reading is ample for the whole
+# suite. A test of the guard plants its own through `Dispatcher(free_bytes=...)`, which takes
+# precedence, and tests of the real reading call the function they captured at import.
+@pytest.fixture(autouse=True)
+def _the_data_root_is_never_low_by_accident(monkeypatch):
+    for mod in list(sys.modules.values()):
+        try:                # the dispatcher is loaded under a different module name per test file
+            ours = hasattr(mod, "Dispatcher") and hasattr(mod, "data_root_free_bytes")
+        except Exception:   # noqa: BLE001 — some third-party modules compute attributes lazily
+            continue
+        if ours:
+            monkeypatch.setattr(mod, "data_root_free_bytes", lambda path: 1 << 40)
 
 
 # --------------------------------------------------------------------------------------------------

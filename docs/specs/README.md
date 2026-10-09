@@ -21,6 +21,7 @@ incident that produced them, which is the fastest way to learn why a rule exists
 | [calibration](calibration.spec.md) | the expected-against-actual report |
 | [fleet-utilization-monitor](fleet-utilization-monitor.spec.md) | finding under-used capacity and proposing the fix |
 | [experiments-retention](experiments-retention.spec.md) | bounding the data root |
+| [free-space-guard](free-space-guard.spec.md) | what the dispatcher does when the data root runs low anyway: hold, alert, fail nothing |
 
 `undeliverable-blob-is-misclassified-as-a-code-bug.md` is a diagnosis note, kept because the code
 refers to it.

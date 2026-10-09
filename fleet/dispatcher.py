@@ -21,6 +21,7 @@ import calendar
 import concurrent.futures
 import contextlib
 import datetime
+import errno
 import fcntl
 import hashlib
 import json
@@ -596,6 +597,17 @@ DEFAULT_SETTINGS = {
     # box-pause inv. 20b: re-push an owned box's capacity schedule to its host enforcer at least this
     # often even when unchanged, so a recreated worker container is healed without a restart.
     "capacity_push_every_min": 30,
+    # free-space-guard spec, invariant 2: the dispatcher HOLDS (no placement, no shipping, no
+    # payload pulls) while less than the first is free on the data root's filesystem, and resumes
+    # once the second is. Two marks with a gap so a volume hovering at the threshold cannot flap.
+    # NEW keys, so `_ensure_settings` seeds them into a live registry on its own; both are read
+    # from the registry on every cycle, so changing one needs no restart. A hold mark of 0 turns
+    # the reading-driven hold off. Absolute GiB (1024^3), like the retention tool's budgets. While
+    # holding, only the registry and a few kilobytes of per-box state are written, so 5 lasts
+    # indefinitely; the 5 between the marks is about a day of result traffic on the fleet this came
+    # from (measured ~5 GB/day). A site with a small data root must lower both.
+    "data_root_hold_free_gb": 5,
+    "data_root_resume_free_gb": 10,
 }
 DEFAULT_PRIORITY = 50  # registry spec schema default — invariant 4d's bypass threshold
 
@@ -2678,6 +2690,70 @@ def offer_counterfactual(raw_offers: list, chosen_offer: dict, task: dict, setti
 
 
 # --------------------------------------------------------------------------------------------
+# Out of space on THIS machine (docs/specs/free-space-guard.spec.md).
+# --------------------------------------------------------------------------------------------
+
+class _LocalDiskFull:
+    """What `rsync_pull` returns when the transfer failed because the RECEIVER — this machine —
+    has no space left (free-space-guard inv. 6).
+
+    FALSY on purpose, so every existing `if not ok` still sees a pull that did not land. DISTINCT
+    on purpose, because the two things a failed pull is otherwise taken to mean are both false
+    here: the box is not unreachable (so it must not count toward the proxy->direct switch or the
+    unreachable-box quarantine), and the artifact is not absent (so a finished task must not be
+    recorded `artifact_missing`). The incident that produced this did both within one cycle."""
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "LOCAL_DISK_FULL"
+
+
+LOCAL_DISK_FULL = _LocalDiskFull()
+_NO_SPACE = "No space left on device"
+
+
+def _pull_hit_local_enospc(stderr: str | None) -> bool:
+    """Did a failed PULL fail on the receiving side's disk? rsync names the errno in its message
+    (`rsync: [receiver] write failed on "...": No space left on device (28)`; older versions omit
+    the role tag). On a pull only the receiver writes, so the words mean THIS machine — unless the
+    line is tagged as the sender's, which is the box talking about its own disk."""
+    return any(_NO_SPACE in ln and "[sender]" not in ln for ln in (stderr or "").splitlines())
+
+
+def out_of_space(exc: BaseException) -> bool:
+    """Is this exception the data root (or the registry on it) being FULL? Exactly two shapes:
+    SQLite's `database or disk is full`, and an `OSError` carrying `ENOSPC`. Deliberately narrow —
+    `database is locked` and every other operational error are NOT this (free-space-guard inv. 7)."""
+    if isinstance(exc, sqlite3.OperationalError):
+        return "database or disk is full" in str(exc)
+    return isinstance(exc, OSError) and exc.errno == errno.ENOSPC
+
+
+def data_root_free_bytes(path) -> int | None:
+    """Bytes the CALLING user can still write on the filesystem holding `path`, or None if that
+    cannot be read (free-space-guard inv. 1). `f_bavail`, not `f_bfree`: the root-only reserve is
+    space this process does not have, and a non-root writer hits zero while `df` still shows some.
+    A filesystem that limits inodes and has none left reads as 0 — nothing can be created on it,
+    whatever its free bytes say. None is UNKNOWN and callers must not read it as low."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    if st.f_files and not st.f_favail:
+        return 0
+    return st.f_bavail * st.f_frsize
+
+
+_GIB = 1024 ** 3
+# Runtime state of the guard, parked in the settings kv table like `pause_i<ID>` and the observed
+# balance: NOT a knob, so not in DEFAULT_SETTINGS. {"holding": bool, "at": ISO, "why": str}.
+DATA_ROOT_GUARD_KEY = "data_root_guard"
+
+
+# --------------------------------------------------------------------------------------------
 # ssh/rsync with proxy->direct fallback (invariant 9a) — impure, but the transport is injected
 # (`run=`) so callers can stub it out in tests without a real network.
 # --------------------------------------------------------------------------------------------
@@ -2718,6 +2794,11 @@ class ConnectionTracker:
 
     def record(self, instance_id: int, ok: bool) -> bool:
         """Returns True iff this call just triggered a proxy->direct switch."""
+        if ok is LOCAL_DISK_FULL:
+            # free-space-guard inv. 6: OUR disk refused the bytes. That says nothing about the box
+            # in either direction, so the count neither grows (it feeds the proxy->direct switch,
+            # the unreachable-box quarantine and the ship deferral) nor resets.
+            return False
         if ok:
             self._fails[instance_id] = 0
             return False
@@ -2834,13 +2915,21 @@ def _run_or_timeout(run, cmd, timeout: int) -> subprocess.CompletedProcess:
 # increments silently drop counts. It is only instrumentation, but an undercount here would read as
 # "barely any rsyncs" exactly when the fleet is busiest, which is the misreading this counter exists
 # to prevent. `itertools.count` would also do; a lock is clearer about why.
-_RSYNC_CALLS = {"n": 0}
+_RSYNC_CALLS = {"n": 0, "local_full": 0}
 _RSYNC_LOCK = threading.Lock()
 
 
 def _rsync_calls() -> int:
     with _RSYNC_LOCK:
         return _RSYNC_CALLS["n"]
+
+
+def _local_full_pulls() -> int:
+    """How many pulls this process has seen refused by ITS OWN disk (free-space-guard inv. 6).
+    Process-wide and locked for the same reason as the call count: the pulls run one thread per
+    box, and the poll loop needs to know one happened without every call site reporting it."""
+    with _RSYNC_LOCK:
+        return _RSYNC_CALLS["local_full"]
 
 
 def rsync_pull(host: str, port: int, remote_path: str, local_path: str, includes: list,
@@ -2884,7 +2973,11 @@ def rsync_pull(host: str, port: int, remote_path: str, local_path: str, includes
     CONVERGES across retries instead of restarting from zero every time — which is what makes it
     land at all, and therefore what gives those tasks a resume point. It cannot reintroduce 7f's
     corruption: the partial is only moved onto the destination name once complete, which is exactly
-    the step `--inplace` skipped. rsync excludes the partial-dir from the transfer itself."""
+    the step `--inplace` skipped. rsync excludes the partial-dir from the transfer itself.
+
+    **Returns `LOCAL_DISK_FULL`, not `False`, when the receiver's disk is what failed**
+    (free-space-guard inv. 6). It is falsy, so nothing that only asks "did it land" changes; the
+    callers that go on to blame the box or the task check for it by identity."""
     flags = ["-rtz"] + (["--inplace", "--append"] if append else [f"--partial-dir={PARTIAL_DIR}"])
     cmd = ["rsync", *flags, "-e", _rsync_ssh_opt(port)]
     for inc in includes:
@@ -2892,7 +2985,14 @@ def rsync_pull(host: str, port: int, remote_path: str, local_path: str, includes
     cmd += ["--exclude", "*", f"root@{host}:{remote_path}", local_path]
     with _RSYNC_LOCK:                           # invariant 23b/23c: count, seconds/call
         _RSYNC_CALLS["n"] += 1
-    return _run_or_timeout(run, cmd, 60).returncode == 0
+    out = _run_or_timeout(run, cmd, 60)
+    if out.returncode == 0:
+        return True
+    if _pull_hit_local_enospc(getattr(out, "stderr", "")):
+        with _RSYNC_LOCK:
+            _RSYNC_CALLS["local_full"] += 1
+        return LOCAL_DISK_FULL
+    return False
 
 
 def rsync_push(host: str, port: int, local_paths: list, remote_path: str, run=subprocess.run) -> bool:
@@ -3089,6 +3189,10 @@ class Dispatcher:
     tracker: ConnectionTracker | None = None
     # inv. 30: (title, message, tags, priority) -> (ok, error). None = ntfy via the env topic.
     notify: object = None
+    # free-space-guard inv. 1: (path) -> bytes this user can still write there, or None if that
+    # cannot be read. None = `data_root_free_bytes` (one statvfs). The ONE seam the reading goes
+    # through, so a test plants a full or a healthy volume without owning one.
+    free_bytes: object = None
 
     def __post_init__(self):
         self.conn = registry_db.connect(self.db_path)
@@ -3123,6 +3227,226 @@ class Dispatcher:
         self._last_worker_refresh: dict[int, float] = {}
         self._worker_refresh_held: dict[int, bool] = {}   # inv 20j-1, edge-triggered hold logging
         self._box_reattach_caps: dict[int, bool] = {}    # inv 20j-3, boxes whose worker re-adopts
+        # free-space-guard. The HOLD itself is in memory, because the thing that fills is the very
+        # registry it would otherwise have to be read from; `_seed_space_guard` restores it from the
+        # mirrored settings row so a restart neither repeats an alert nor forgets a hold.
+        self._space_hold = False
+        self._space_why: str | None = None            # "free" | "registry" | "write"
+        self._space_since: float | None = None        # epoch the current hold began
+        self._space_resumed_at: float | None = None   # epoch the last hold ended (inv. 5 clocks)
+        self._space_free_gb: float | None = None      # this cycle's reading, None = unknown
+        self._space_unsaved = False                   # the begin edge still owes its event + row
+        self._space_push: tuple | None = None         # an edge's push not yet delivered
+        self._space_deferred = 0                      # completions deferred this cycle
+        self._space_noted_at = 0.0                    # rate limit for the abandoned-cycle line
+        self._local_full_seen = _local_full_pulls()   # inv. 6: counter baseline
+        self._local_enospc = False                    # inv. 6: a box's ingest raised ENOSPC here
+        self._local_full_prev = False                 # inv. 6: edge for `local_pull_no_space`
+        self._seed_space_guard()
+
+    # -- free-space guard (docs/specs/free-space-guard.spec.md) --
+    def _seed_space_guard(self) -> None:
+        """Restore the guard from `settings['data_root_guard']` at start (inv. 3). Reads only; a
+        missing or unreadable row is simply "no hold, no recent release"."""
+        state = self.settings.get(DATA_ROOT_GUARD_KEY)
+        if not isinstance(state, dict):
+            return
+        try:
+            at = calendar.timegm(time.strptime(str(state.get("at")), "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            at = time.time()
+        if state.get("holding"):
+            self._space_hold, self._space_since = True, float(at)
+            self._space_why = str(state.get("why") or "free")
+        else:
+            self._space_resumed_at = float(at)
+
+    def _space_marks(self) -> tuple[float, float]:
+        """(hold, resume) in GiB, read from the registry NOW (inv. 2). Anything unreadable falls
+        back to the defaults; a resume mark below the hold mark is read as the hold mark."""
+        def num(key):
+            try:
+                return max(0.0, float(self._live_setting(key)))
+            except (TypeError, ValueError, sqlite3.Error):
+                return float(DEFAULT_SETTINGS[key])
+        hold = num("data_root_hold_free_gb")
+        return hold, max(hold, num("data_root_resume_free_gb"))
+
+    def _read_free_gb(self) -> float | None:
+        """This cycle's reading in GiB, or None = UNKNOWN (inv. 1). The seam may be a test double
+        or a site's own probe, so anything it raises is also "unknown", never "low"."""
+        try:
+            b = (self.free_bytes or data_root_free_bytes)(EXPERIMENTS_ROOT)
+        except Exception:                            # noqa: BLE001 — a reading must not kill the poll
+            return None
+        return None if b is None else max(0.0, float(b)) / _GIB
+
+    def _check_data_root(self) -> None:
+        """Invariants 1-3: read once, then begin or end a HOLD on the two marks. Top of every cycle.
+
+        Unknown never begins a hold and never ends one. A hold that began because the registry
+        could not be written (inv. 7) ends by the same rule AND only if `_end_space_hold` manages
+        to write its event — which is what keeps a still-full registry from flapping."""
+        hold_gb, resume_gb = self._space_marks()
+        free = self._space_free_gb = self._read_free_gb()
+        if not self._space_hold:
+            if hold_gb > 0 and free is not None and free < hold_gb:
+                self._begin_space_hold("free", free)
+        elif hold_gb <= 0 or (free is not None and free >= resume_gb):
+            self._end_space_hold(free)
+        if self._space_hold and self._space_unsaved:
+            self._save_space_hold()
+        self._retry_space_push()
+
+    def _space_detail(self, free: float | None, **extra) -> str:
+        hold_gb, resume_gb = self._space_marks()
+        return json.dumps({"free_gb": None if free is None else round(free, 2),
+                           "hold_free_gb": hold_gb, "resume_free_gb": resume_gb,
+                           "why": self._space_why, **extra}, separators=(",", ":"))
+
+    def _begin_space_hold(self, why: str, free: float | None, exc: BaseException | None = None):
+        """Enter HOLD. In memory first and unconditionally: everything after this line may fail on
+        the same full disk, and the hold must be in force regardless (inv. 3, inv. 7)."""
+        self._space_hold, self._space_why, self._space_since = True, why, time.time()
+        self._space_unsaved, self._space_free_gb = True, free
+        hold_gb, resume_gb = self._space_marks()
+        seen = "unknown" if free is None else f"{free:.1f} GB"
+        cause = (f"{seen} free is below the {hold_gb:g} GB hold mark" if why == "free" else
+                 f"a write failed with {type(exc).__name__}: {exc} ({seen} free)")
+        msg = (f"data root {EXPERIMENTS_ROOT}: {cause}. HOLDING — no placement, no shipping, no "
+               f"result/checkpoint/TensorBoard pulls; the registry, heartbeats and cancels keep "
+               f"running. Free space (python fleet/prune_experiments.py --apply) to resume at "
+               f"{resume_gb:g} GB. Finished tasks keep their files on their boxes for 12 hours.")
+        self._alert(msg)
+        self._space_push = ("low", "coordinator: data root low, HOLDING", msg, "warning", "high")
+        self._save_space_hold()
+
+    def _save_space_hold(self) -> None:
+        """Write the begin edge's event and state row — once. If the registry is what is full this
+        fails, the hold stands, and the next cycle tries again (`_space_unsaved`)."""
+        try:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                (DATA_ROOT_GUARD_KEY, json.dumps(
+                    {"holding": True, "why": self._space_why, "at": registry_db.now_iso()})))
+            registry_db.log_event(self.conn, "data_root_low",
+                                  self._space_detail(self._space_free_gb))
+            self.conn.commit()
+            self._space_unsaved = False
+        except sqlite3.Error as e:
+            with contextlib.suppress(sqlite3.Error):
+                self.conn.rollback()
+            print(f"[log-failed] data_root_low ({type(e).__name__}: {e}) — the hold is in force; "
+                  f"the event is written when the registry can take it", file=sys.stderr, flush=True)
+
+    def _end_space_hold(self, free: float | None) -> None:
+        """Leave HOLD — but only if the registry takes the `data_root_ok` event (inv. 7). The write
+        comes FIRST and decides: a full registry raises here, the hold stays, and nothing flaps."""
+        held_min = round((time.time() - (self._space_since or time.time())) / 60, 1)
+        try:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                (DATA_ROOT_GUARD_KEY, json.dumps({"holding": False, "at": registry_db.now_iso()})))
+            if self._space_unsaved:               # the begin edge never reached the log: pair it
+                registry_db.log_event(self.conn, "data_root_low", self._space_detail(None))
+            registry_db.log_event(self.conn, "data_root_ok",
+                                  self._space_detail(free, held_min=held_min))
+            self.conn.commit()
+        except sqlite3.Error as e:
+            with contextlib.suppress(sqlite3.Error):
+                self.conn.rollback()
+            print(f"[log-failed] data_root_ok ({type(e).__name__}: {e}) — the hold stays until the "
+                  f"registry can record its end", file=sys.stderr, flush=True)
+            return
+        self._space_hold, self._space_unsaved = False, False
+        self._space_resumed_at = time.time()
+        seen = "space" if free is None else f"{free:.1f} GB free"
+        msg = (f"data root {EXPERIMENTS_ROOT}: {seen} — hold released after {held_min:g} min. "
+               f"Placement, shipping and pulls resume; deferred completions are collected now.")
+        self._alert(msg)
+        self._space_push = ("ok", "coordinator: data root ok, resumed", msg,
+                            "white_check_mark", "default")
+        self._space_why = None
+
+    def _retry_space_push(self) -> None:
+        """Deliver an edge's ONE push (inv. 3): retried each cycle until the channel takes it, like
+        the GPU alerts (inv. 30). `None` = no channel configured, which is final, not a failure."""
+        if self._space_push is None:
+            return
+        kind, title, msg, tags, prio = self._space_push
+        try:
+            ok, err = self._send_alert(title, msg, tags, prio)
+        except Exception as e:                       # noqa: BLE001 — a channel must not kill the poll
+            ok, err = False, f"{type(e).__name__}: {e}"
+        if ok is False:
+            return
+        self._space_push = None
+        self._safe_log("notify", json.dumps({"kind": f"data_root_{kind}", "ok": ok, "error": err},
+                                            separators=(",", ":")))
+
+    def _copies_unconfirmed(self) -> bool:
+        """Should the reapers that judge by a locally PULLED copy stand down this cycle (inv. 5/6)?
+        Yes while holding, and yes in any cycle where a pull was refused by our own disk: in both
+        cases a stale copy means WE did not fetch it, not that the box or the task went quiet."""
+        n = _local_full_pulls()
+        seen = n != self._local_full_seen or self._local_enospc
+        self._local_full_seen, self._local_enospc = n, False
+        if seen and not self._local_full_prev and not self._space_hold:
+            self._safe_log("local_pull_no_space",
+                           "a pull was refused by THIS machine's disk (rsync: No space left on "
+                           "device) — not counted against the box, completions deferred, the "
+                           "pulled-copy reapers skipped this cycle (free-space-guard inv. 6)")
+        self._local_full_prev = seen
+        return self._space_hold or seen
+
+    def _hold_floor(self, since: float) -> float:
+        """Invariant 5: a clock the hold stopped feeding restarts when the hold ended."""
+        return since if self._space_resumed_at is None else max(since, self._space_resumed_at)
+
+    @staticmethod
+    def _on_data_root(exc: BaseException) -> bool:
+        """Is an out-of-space error about the DATA ROOT (inv. 7)? The registry's own error always
+        is, for this purpose: its hold ends only when the registry can be written again. An
+        `ENOSPC` that names a path elsewhere (a temp directory on another filesystem) is not: the
+        reading would say "plenty", the hold would end, and the same error would begin it again
+        every cycle. That case keeps its old behaviour and propagates. No path named = assume ours."""
+        name = getattr(exc, "filename", None)
+        if isinstance(exc, sqlite3.Error) or name is None:
+            return True
+        try:
+            Path(os.fsdecode(name)).resolve().relative_to(Path(EXPERIMENTS_ROOT).resolve())
+            return True
+        except (ValueError, OSError):
+            return False
+
+    def poll_survivable(self) -> bool:
+        """One poll cycle that SURVIVES the data root being full (inv. 7). Returns False if the
+        cycle was abandoned.
+
+        The loop had no handler at all: `database or disk is full` from any registry write killed
+        the process, its supervisor restarted it, and it died again on the next write — about an
+        hour of recording nothing, in the incident this spec opens with. Abandoning the CYCLE is
+        what a crash did too (the open transaction is rolled back either way); staying up is what
+        lets the hold, the alert and the eventual resume happen. Nothing else is caught."""
+        try:
+            self.poll_once()
+            return True
+        except (sqlite3.OperationalError, OSError) as e:
+            if not out_of_space(e) or not self._on_data_root(e):
+                raise
+            with contextlib.suppress(sqlite3.Error):
+                self.conn.rollback()
+            if not self._space_hold:
+                self._begin_space_hold(
+                    "registry" if isinstance(e, sqlite3.Error) else "write", self._read_free_gb(), e)
+                self._retry_space_push()
+                self._space_noted_at = time.time()
+            elif time.time() - self._space_noted_at >= 600:
+                # One line per ten minutes, not one per abandoned cycle: the hold already alerted.
+                print(f"[ALERT] poll cycle abandoned, still out of space: {type(e).__name__}: {e}",
+                      file=sys.stderr, flush=True)
+                self._space_noted_at = time.time()
+            return False
 
     def _seed_box_res(self) -> None:
         """Invariant 28b: restore each live box's PREVIOUS CPU counter from the event log at startup.
@@ -3438,6 +3762,12 @@ class Dispatcher:
             finally:
                 phase_sec[name] = round(time.monotonic() - t0, 1)
 
+        # free-space-guard inv. 1-3: read the data root FIRST, so everything below already knows
+        # whether this cycle may consume space. Not timed (one statvfs) and not in `--dry-run`,
+        # whose contract is no DB writes — `holding` is simply False there.
+        if not self.dry_run:
+            self._check_data_root()
+        holding = self._space_hold and not self.dry_run
         timed("reconcile", self.do_reconcile)
         # ingest/completion/checkpoint pulls and ship/teardown I/O are invoked here in the live
         # (non-dry-run) daemon; kept out of --dry-run (spec: no vastai/ssh calls, no DB writes).
@@ -3458,10 +3788,15 @@ class Dispatcher:
             timed("box_requests", self._consume_box_requests)  # on-demand reachability (remote-submit 19a)
             timed("measure", self._measure_box_resources)  # invariant 22: sample real box VRAM
             timed("book_cost", self._book_live_costs)  # invariant 12b: accrue live spend in-flight
-        timed("place", self._place_queue)
+        # free-space-guard inv. 4: a HOLD stops exactly the three phases that create new result
+        # traffic — placement (claim, rent, preempt-for-placement), consolidation and shipping.
+        # Teardown and the garbage collections below keep running: they stop spend and free space.
+        if not holding:
+            timed("place", self._place_queue)
         if not self.dry_run:
-            timed("consolidate", self._consolidate)  # invariant 21: drain paid boxes onto free capacity
-            timed("ship", self._ship_all)
+            if not holding:
+                timed("consolidate", self._consolidate)  # invariant 21: drain paid boxes onto free capacity
+                timed("ship", self._ship_all)
             timed("teardown", self._teardown_idle)
             timed("gc_staging", self._gc_ship_staging)  # inv. 12: .ship/ leaked 106GB / 2783 dirs
             timed("gc_temps", self._gc_pull_temps)      # inv. 7g: pull temps leaked 210GB / 342
@@ -3494,7 +3829,14 @@ class Dispatcher:
              "ship_duty": round(phase_sec.get("ship", 0.0) / total, 2) if total else 0.0,
              "phases": dict(sorted(phase_sec.items(), key=lambda kv: -kv[1])),
              # invariant 23b: the dominant phase's own breakdown + transport call count
-             "ingest_detail": getattr(self, "_ingest_detail", None)}))
+             "ingest_detail": getattr(self, "_ingest_detail", None),
+             # free-space-guard inv. 10: the reading, EVERY cycle, holding or not — so the registry
+             # carries a time series of the volume filling and nobody has to wait for a mark to be
+             # crossed to see it coming (or ssh + df to learn which filesystem the guard is
+             # reading). null = the read failed. One key; nothing else in this event changes.
+             "data_root": {"free_gb": (None if self._space_free_gb is None
+                                       else round(self._space_free_gb, 2)),
+                           "holding": holding, "deferred": self._space_deferred}}))
 
     def _refresh_heartbeats(self):
         """Pull ONLY `HEARTBEAT`, for every live/paused box, at the TOP of the poll cycle.
@@ -3539,6 +3881,7 @@ class Dispatcher:
         sub: dict[str, float] = {"worker_state": 0.0, "markers": 0.0, "payloads_wall": 0.0}
         n_rsync = dict.fromkeys(sub, 0)
         before = _rsync_calls()
+        self._space_deferred = 0                       # free-space-guard: completions deferred
 
         def _sub(name, fn, *a):
             """Time a sub-phase and count the transport calls it made, recording both even if it
@@ -3617,6 +3960,11 @@ class Dispatcher:
         plan, now = [], time.time()
         ckpt_interval = self.settings["checkpoint_pull_every_min"] * 60
         for inst in insts:
+            # free-space-guard inv. 4: while HOLDING the plan stays empty. TensorBoard events and
+            # checkpoints are where the bytes go; the small state above (worker.jsonl, HEARTBEAT,
+            # the marker listing) is what the loop needs to keep seeing boxes and starts.
+            if self._space_hold:
+                break
             tasks = self._running_on(inst["id"])
             if not tasks:
                 continue
@@ -3658,17 +4006,25 @@ class Dispatcher:
             "payload_boxes": len(plan),
             "payload_speedup": round(sum(work.values()) / wall, 1) if wall > 0.05 else None,
         }
-        self._reap_stalled()
-        self._reap_dead_workers()
+        # free-space-guard inv. 5/6: the five reapers that judge a task or a box by a locally PULLED
+        # copy (TensorBoard/checkpoint age, the HEARTBEAT copy, worker.jsonl) or by ships we have
+        # stopped making stand down while we hold, and in any cycle where our own disk refused a
+        # pull. Their evidence did not go stale because a box or a task went quiet; WE did not fetch
+        # it. The other three read only the registry or real transport failures and keep running.
+        judge = not self._copies_unconfirmed()
+        if judge:
+            self._reap_stalled()
+            self._reap_dead_workers()
         self._reap_orphaned_tasks()
-        self._reap_overpacked_boxes()
-        # AFTER the over-pack reaper: 19h owns a box that is provably launching and requeues at no
-        # retry cost, so it must get first refusal on a gate-held `shipped` task before 10b (whose
-        # shorter 15min timeout would otherwise charge half a retry for the same symptom).
-        self._reap_unclaimed_ships()
-        # AFTER 10b: that one owns a task we DID deliver (state `shipped`), this one a task we never
-        # could (state `claimed`). Disjoint by state, so the order is for readability, not conflict.
-        self._reap_undeliverable_claims()
+        if judge:
+            self._reap_overpacked_boxes()
+            # AFTER the over-pack reaper: 19h owns a box that is provably launching and requeues at no
+            # retry cost, so it must get first refusal on a gate-held `shipped` task before 10b (whose
+            # shorter 15min timeout would otherwise charge half a retry for the same symptom).
+            self._reap_unclaimed_ships()
+            # AFTER 10b: that one owns a task we DID deliver (state `shipped`), this one a task we never
+            # could (state `claimed`). Disjoint by state, so the order is for readability, not conflict.
+            self._reap_undeliverable_claims()
         self._reap_unreachable_owned()
         self._reap_paused_soft_timeout()
 
@@ -4771,6 +5127,10 @@ class Dispatcher:
         import datetime
         now = datetime.datetime.utcnow()
         timeout = self.settings["ship_timeout_min"]
+        # free-space-guard inv. 5: ships are stopped during a HOLD, so time spent `claimed` under
+        # one is not time we spent failing to deliver. The clock restarts when the hold ended.
+        since_resume = (float("inf") if self._space_resumed_at is None
+                        else (time.time() - self._space_resumed_at) / 60)
         for inst in [dict(r) for r in self.conn.execute(
                 "SELECT * FROM instances WHERE state='live'")]:
             occ = [dict(r) for r in self.conn.execute(
@@ -4779,7 +5139,7 @@ class Dispatcher:
             if any(t["state"] in ("running", "preempting") for t in occ):
                 continue  # the box is doing real work — this is not its problem
             stuck = [t for t in occ if t["state"] == "claimed"
-                     and _age_minutes(t["updated_at"], now) > timeout
+                     and min(_age_minutes(t["updated_at"], now), since_resume) > timeout
                      and self.conn.execute(
                          "SELECT 1 FROM events WHERE task_id=? AND instance_id=? AND "
                          "event='ship_failed' LIMIT 1", (t["id"], inst["id"])).fetchone()]
@@ -5300,6 +5660,12 @@ class Dispatcher:
             running_since = datetime.datetime.strptime(
                 t["updated_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
                 tzinfo=datetime.timezone.utc).timestamp()
+            # free-space-guard inv. 5: TensorBoard and checkpoint pulls were stopped during a HOLD,
+            # so the two mtimes above stood still for a reason that is ours. `stall_decision`
+            # anchors on the LATEST of its three clocks, so flooring this one at the moment the
+            # hold ended restarts the whole stall clock there: a task cannot be reaped in the first
+            # cycle after on what it did not report during it (e.g. its first pull timing out).
+            running_since = self._hold_floor(running_since)
             view = dict(t, ckpt_mtime=ckpt_mtime, tb_mtime=tb_mtime, running_since=running_since)
             if not stall_decision(view, now, self.settings):
                 continue
@@ -5714,6 +6080,13 @@ class Dispatcher:
             # normally, or a DONE/FAILED/PREEMPTED if the run happened to finish mid-cancel).
             if task["state"] == "cancelling" or marker == "CANCELLED":
                 self._complete_cancelled(task, host, port)
+            elif self._space_hold:
+                # free-space-guard inv. 4/5: the other three completions each PULL — results, the
+                # crash log, the checkpoint — and decide on what landed. While holding nothing can
+                # land, so acting now is how a finished run became `artifact_missing` and a
+                # preempted one restarted from zero. The marker stays on the box and the task in
+                # its state; the first cycle after the hold completes it normally.
+                self._space_deferred += 1
             elif marker == "DONE":
                 self._complete_done(task, inst, host, port)
             elif marker.startswith("FAILED_"):
@@ -5823,6 +6196,12 @@ class Dispatcher:
         includes = ["*/", "tb/**", "*.json", "*.jsonl", "*.log", "ckpt_*.pt"]
         ok = rsync_pull(host, port, remote, str(local_out) + "/", includes, run=self.run)
         self.tracker.record(inst["id"], ok)
+        if ok is LOCAL_DISK_FULL:
+            # free-space-guard inv. 6: OUR disk refused the results. Deferred whole — even if the
+            # small completion artifact happened to land — because `done` is terminal and nothing
+            # re-pulls a terminal task: declaring it now would strand every byte that did not fit.
+            self._space_deferred += 1
+            return
         entry = entrypoints.resolve(task)  # manifest contract if present, else the named table
         artifact = local_out / entry.completion_artifact
         # The worker only raises DONE after the run finished and wrote its completion artifact, so
@@ -5854,8 +6233,12 @@ class Dispatcher:
             # one makes the retry actually able to succeed. The bulk artifacts are not lost — the next
             # ingest pass keeps pulling them; only the COMPLETION DECISION is decoupled from having to
             # move hundreds of MB inside one timeout.
-            ok = rsync_pull(host, port, remote, str(local_out) + "/",
-                             [entry.completion_artifact], run=self.run) or ok
+            retry = rsync_pull(host, port, remote, str(local_out) + "/",
+                                [entry.completion_artifact], run=self.run)
+            if retry is LOCAL_DISK_FULL and not artifact.exists():
+                self._space_deferred += 1              # inv. 6: not home is not the same as absent
+                return
+            ok = retry or ok
         if artifact.exists():
             registry_db.transition(self.conn, task["id"], "done", "done",
                                     "completion artifact verified",
@@ -5913,8 +6296,8 @@ class Dispatcher:
 
     def _complete_failed(self, task: dict, inst: dict, host: str, port: int, marker: str) -> None:
         local_out = self._result_dir(task)
-        rsync_pull(host, port, f"~/spool/active/{task['id']}/out/", str(local_out) + "/",
-                    ["*.log", "*.json"], run=self.run)
+        got_out = rsync_pull(host, port, f"~/spool/active/{task['id']}/out/", str(local_out) + "/",
+                              ["*.log", "*.json"], run=self.run)
         # The trainer's stdout+stderr -- the actual crash traceback -- is captured by the box worker
         # to `active/<id>/run.log` (spool_worker.py), a SIBLING of `out/` one level ABOVE it, so the
         # `out/`-rooted pull above (and every other ingest pull) structurally can never reach it: an
@@ -5928,8 +6311,15 @@ class Dispatcher:
         # reason (surfaced by `runq show`) and the [ALERT] (coordinator.log) so the crash cause is
         # visible without ssh'ing to a box that may already be gone. Best-effort: a failed pull just
         # yields an empty tail and the old bare-exit reason -- never blocks the task_failed CAS.
-        rsync_pull(host, port, f"~/spool/active/{task['id']}/", str(local_out) + "/",
-                    ["run.log"], run=self.run)
+        got_log = rsync_pull(host, port, f"~/spool/active/{task['id']}/", str(local_out) + "/",
+                              ["run.log"], run=self.run)
+        if got_out is LOCAL_DISK_FULL or got_log is LOCAL_DISK_FULL:
+            # free-space-guard inv. 6. "Best-effort" above is about a box we cannot reach. Here the
+            # box answered and OUR disk refused the forensics, and the CAS below ends with
+            # `_gc_box_task_dir` deleting the only other copy — so wait for a cycle that can hold
+            # them. The FAILED marker stays on the box; the task stays in its state.
+            self._space_deferred += 1
+            return
         tail = self._run_log_tail(local_out / "run.log")
         rc = marker.split("_", 1)[1] if "_" in marker else "?"
         # Zero-scalar tripwire: a task_failed that died before writing so much as one checkpoint
@@ -6090,6 +6480,12 @@ class Dispatcher:
         ok = rsync_pull(host, port, f"~/spool/active/{task['id']}/out/", str(local_out) + "/",
                          ["ckpt_latest.pt", "ckpt_latest.pt.prev"], run=self.run)
         self.tracker.record(inst["id"], ok)
+        if ok is LOCAL_DISK_FULL:
+            # free-space-guard inv. 6: the final checkpoint is on the box and OUR disk refused it.
+            # Requeueing now would resume from a stale copy (or from zero) while the fresh one sits
+            # behind a marker we would never read again. Wait for a cycle that can hold it.
+            self._space_deferred += 1
+            return
         # Invariant 17f: a FAILED final pull must not DISCARD a checkpoint we already hold.
         #
         # This used to require `ok and ckpt.exists()`, so one transient rsync failure at preempt time
@@ -6310,7 +6706,17 @@ class Dispatcher:
     def _ingest_box_failed(self, instance_id: int, exc: BaseException) -> None:
         """One box's parallel pull raised. Record it the same way a failed payload pull is recorded
         — an event plus a tracker failure — so the existing reapers see the box as unreachable
-        instead of silently skipping it with no trace."""
+        instead of silently skipping it with no trace.
+
+        free-space-guard inv. 6: unless what it raised is THIS machine being out of space (the
+        scratch dir or a result dir could not be created). That is not the box, so it is logged,
+        counted against nothing, and makes this a cycle whose pulled copies are unconfirmed."""
+        if out_of_space(exc):
+            self._local_enospc = True
+            self._safe_log("ingest_box_failed",
+                           f"LOCAL out of space, not the box: {type(exc).__name__}: {exc}",
+                           instance_id=instance_id)
+            return
         self.log("ingest_box_failed", f"{type(exc).__name__}: {exc}", instance_id=instance_id)
         self.tracker.record(instance_id, False)
 
@@ -6318,6 +6724,8 @@ class Dispatcher:
         """SERIAL half: every DB write and tracker mutation the parallel pulls implied."""
         if res.get("error"):
             self.log("ingest_box_failed", res["error"], instance_id=instance_id)
+            if _NO_SPACE in res["error"]:              # free-space-guard inv. 6: ours, not the box's
+                self._local_enospc = True
         for _tid, ok in res["tb"]:
             self.tracker.record(instance_id, ok)
         for tid, ok, newest in res["ckpt"]:
@@ -8251,7 +8659,9 @@ def main(argv: list[str] | None = None) -> int:
             d.poll_once()
             return 0
         while True:
-            d.poll_once()
+            # free-space-guard inv. 7: a cycle that dies on a full data root is abandoned, not the
+            # process. Every other exception still propagates and still ends it.
+            d.poll_survivable()
             time.sleep(d.settings["poll_seconds"])
 
 
