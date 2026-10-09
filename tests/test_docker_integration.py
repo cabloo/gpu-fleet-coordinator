@@ -164,7 +164,15 @@ def provisioned(vast_box, tmp_path_factory, monkeypatch_module_chdir):
         (reg.now_iso(), "provisioning", disp._iso_plus_hours(1)))
     d.conn.commit()
     ok = d._provision(1, deny_file)
-    assert ok, "provisioning (ssh probe + ship bootstrap + start spool_worker) failed"
+    if not ok:
+        # Say WHY in the one line a CI summary keeps: the registry's last events and sshd's own log.
+        events = [f"{r[0]}: {str(r[1])[:160]}" for r in d.conn.execute(
+            "SELECT event, detail FROM events ORDER BY seq DESC LIMIT 6")]
+        logs = subprocess.run(["docker", "logs", "--tail", "12", vast_box["container"]],
+                              capture_output=True, text=True)
+        sshd = " / ".join((logs.stderr or logs.stdout).strip().splitlines()[-12:])
+        pytest.fail("provisioning (ssh probe + ship bootstrap + start spool_worker) failed"
+                    f" | events: {events} | sshd: {sshd[-900:]}")
     d.conn.execute("UPDATE instances SET state='live', ssh_host=?, ssh_port=? WHERE id=1",
                     (vast_box["host"], vast_box["port"]))
     d.conn.commit()
