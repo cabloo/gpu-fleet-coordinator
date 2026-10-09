@@ -17,4 +17,7 @@ RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
     && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 
 EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D", "-e"]
+# StrictModes off: the test bind-mounts authorized_keys from the host, where it belongs to whoever
+# runs the tests. sshd refuses a key file that is not owned by root or the login user, so on any
+# host where Docker is not driven by root the container never accepted the test key.
+CMD ["/usr/sbin/sshd", "-D", "-e", "-o", "StrictModes=no"]

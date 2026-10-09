@@ -8,6 +8,7 @@ this module is a convenience wrapper, not a hidden cross-feature API.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sqlite3
 import uuid
@@ -30,7 +31,15 @@ def shared_experiments_root() -> Path:
     main checkout is polling, and the shipped payload (`git archive <task.git_sha>`) is that
     worktree's exact commit — testing on Vast has never required merging to master first, only
     committing. Pass `--db`/construct `Dispatcher(db_path=...)` explicitly to opt out (e.g. the
-    docker integration test and unit tests always do)."""
+    docker integration test and unit tests always do).
+
+    `FLEET_DATA_ROOT`, when set, IS the root and nothing is inferred. Everything above assumes this
+    file sits inside the project whose runs it stores. A project that uses the coordinator from a
+    separate checkout (pinned by commit) cannot be found that way — `git rev-parse` here would
+    answer for the coordinator's own repository — so that project's launcher names its data root."""
+    override = os.environ.get("FLEET_DATA_ROOT", "").strip()
+    if override:
+        return Path(override)
     here = Path(__file__).resolve().parent
     try:
         out = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=here,
@@ -43,6 +52,18 @@ def shared_experiments_root() -> Path:
     except (OSError, subprocess.TimeoutExpired):
         pass
     return here.parent / "experiments"  # not a git checkout at all — best-effort fallback
+
+
+def site_file(name: str, default: Path) -> Path:
+    """A SITE's own data file: `<FLEET_SITE_DIR>/<name>` when that variable is set, else `default`.
+
+    Three files the coordinator reads are facts about one fleet, not code: the capacity schedules
+    (`capacity/<label>.json`), the learned run-time estimates (`est_defaults.json`) and the seed
+    list of machines never to rent (`machines.deny`). Their defaults are paths inside this checkout,
+    which is right when the coordinator lives in the project and wrong when a project pins it from
+    elsewhere. Read at call time, so a launcher or a test can set it at any point."""
+    site = os.environ.get("FLEET_SITE_DIR", "").strip()
+    return Path(site) / name if site else default
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS tasks (

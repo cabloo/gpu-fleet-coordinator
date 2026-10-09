@@ -80,7 +80,8 @@ EXPERIMENTS_ROOT = registry_db.shared_experiments_root()
 DEFAULT_DB = str(EXPERIMENTS_ROOT / "runs.sqlite")
 LOCK_PATH = EXPERIMENTS_ROOT / ".dispatcher.lock"
 # Static, hand-maintained seed list -- committed to git, never written by the daemon itself.
-MACHINES_DENY = Path(__file__).resolve().parent / "machines.deny"
+# Site data: `<FLEET_SITE_DIR>/machines.deny` when a site directory is named (registry_db.site_file).
+MACHINES_DENY = registry_db.site_file("machines.deny", Path(__file__).resolve().parent / "machines.deny")
 # Auto-blacklist target (bug found live 2026-07-09): this file used to BE `MACHINES_DENY` above,
 # but that path lives inside the canonical checkout's own git working tree -- every automatic
 # append (a bad box, several times a day) left that checkout permanently dirty, which silently
@@ -3959,7 +3960,8 @@ class Dispatcher:
         malformed). A malformed schedule is logged and treated as uncapped — never wedges the poll."""
         if inst.get("source") != "owned":
             return None
-        path = ROOT / "configs" / "capacity" / f"{inst['label']}.json"
+        name = f"{inst['label']}.json"
+        path = registry_db.site_file(f"capacity/{name}", ROOT / "configs" / "capacity" / name)
         if not path.exists():
             return None
         try:

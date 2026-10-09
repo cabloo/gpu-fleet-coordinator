@@ -28,6 +28,9 @@
 #         --no-gpu (CPU-only box)   --base-image IMG (override the auto-picked torch image)
 #         --recreate (replace a running worker — DRAIN IT FIRST:
 #         `python fleet/box_pause.py drain --label L`)   --bundle (print self-contained copy)
+#         --name N (default fleet: what this fleet is called ON THIS HOST. It prefixes the worker
+#         image, its container, its directories and its timer, so a host set up under one name
+#         must always be re-run with that name, or it gets a second, parallel installation)
 set -euo pipefail
 # The WHOLE body is one `{ ... }` block, so bash parses all of it before running any of it. Without
 # this, bash reads the file as it goes, and replacing the file mid-run (re-copying the bundle while it
@@ -36,10 +39,7 @@ set -euo pipefail
 {
 
 PAYLOAD_FILES=(Dockerfile.owned_worker capacity.py box_capacity_apply.py)
-IMAGE=fleet-owned-worker
-ETC=/etc/fleet-worker
-CONTROL=/var/lib/fleet-worker/control
-OPT=/opt/fleet-worker
+NAME=fleet
 
 ORIG_ARGS="$*"
 # The coordinator's ssh PUBLIC key: the only key let into the worker. Pass it with --fleet-key.
@@ -54,7 +54,8 @@ while [ $# -gt 0 ]; do
     --recreate) RECREATE=1; shift ;;
     --base-image) BASE_IMAGE="$2"; shift 2 ;;
     --bundle) BUNDLE=1; shift ;;
-    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+    --name) NAME="$2"; shift 2 ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -62,6 +63,14 @@ done
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Everything this script creates on the host is named after the fleet (--name).
+[[ "$NAME" =~ ^[a-z][a-z0-9-]*$ ]] || die "--name must be lowercase letters, digits, dashes"
+IMAGE=$NAME-owned-worker
+ETC=/etc/$NAME-worker
+CONTROL=/var/lib/$NAME-worker/control
+OPT=/opt/$NAME-worker
+UNIT=$NAME-capacity
 
 # --- --bundle: this script + its three payload files as ONE runnable file (base64 tar trailer) -----
 MARK=__FLEET_OWNED_BOX_PAYLOAD__
@@ -82,7 +91,7 @@ fi
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] || die "this script targets Ubuntu (found ${ID:-unknown})"
 [ "${VERSION_ID:-}" = 26.04 ] || warn "written for Ubuntu 26.04, found ${VERSION_ID:-?} — continuing"
-WORKER="fleet-${LABEL}-worker"
+WORKER="$NAME-${LABEL}-worker"
 export DEBIAN_FRONTEND=noninteractive
 
 # The payload: the bundle's trailer, else the files beside this script (running from a checkout).
@@ -267,7 +276,7 @@ fi
 log "installing the capacity enforcer (systemd timer, every minute)"
 install -m 0644 "$PAYLOAD/capacity.py" "$PAYLOAD/box_capacity_apply.py" "$OPT/"
 NOGPU_FLAG=""; [ "$NO_GPU" = 1 ] && NOGPU_FLAG=" --no-gpu"
-cat > /etc/systemd/system/fleet-capacity.service <<EOF
+cat > /etc/systemd/system/$UNIT.service <<EOF
 [Unit]
 Description=GPU fleet: apply the coordinator's time-of-day CPU/GPU caps to $WORKER
 After=docker.service
@@ -277,7 +286,7 @@ Wants=docker.service
 Type=oneshot
 ExecStart=/usr/bin/python3 $OPT/box_capacity_apply.py --uncapped-if-missing --config $CONTROL/capacity.json --container $WORKER$NOGPU_FLAG
 EOF
-cat > /etc/systemd/system/fleet-capacity.timer <<EOF
+cat > /etc/systemd/system/$UNIT.timer <<EOF
 [Unit]
 Description=GPU fleet: re-apply capacity caps every minute
 
@@ -290,8 +299,8 @@ AccuracySec=5s
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable --now fleet-capacity.timer >/dev/null
-systemctl start fleet-capacity.service || warn "first enforcer run failed: journalctl -u fleet-capacity"
+systemctl enable --now "$UNIT.timer" >/dev/null
+systemctl start "$UNIT.service" || warn "first enforcer run failed: journalctl -u $UNIT"
 
 # --- host hygiene -----------------------------------------------------------------------------
 log "masking suspend/hibernate (a sleeping box reads as a dead one)"
@@ -337,7 +346,7 @@ if [ "$NO_GPU" = 0 ]; then cat <<EOF
            {"from": "07:00", "to": "23:00", "cpu": 0.5, "vram": 0.5, "gpu_power": 0.6}
          ]
        }
-     Check what is applied here any time:  journalctl -u fleet-capacity -n 20
+     Check what is applied here any time:  journalctl -u $UNIT -n 20
 EOF
 else cat <<EOF
 

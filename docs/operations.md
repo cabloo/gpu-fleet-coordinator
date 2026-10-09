@@ -264,10 +264,29 @@ The defaults, with the measurement behind each, are `DEFAULT_SETTINGS` at the to
 | variable | used by | meaning |
 |---|---|---|
 | `RUNQ_ACTOR` | client | default for `--by` |
+| `FLEET_DATA_ROOT` | everything | the data root, instead of `experiments/` beside the code |
+| `FLEET_SITE_DIR` | dispatcher, client | a directory holding `capacity/<label>.json`, `est_defaults.json` and `machines.deny`, instead of the copies inside this checkout |
 | `DISPATCHER_SSH_KEY` | dispatcher | private key for reaching boxes, instead of the default identity |
 | `DISPATCHER_NTFY_TOPIC`, `DISPATCHER_NTFY_SERVER` | dispatcher | push alerts through ntfy; unset means none |
 | `DISPATCHER_BUNDLE_SIGN_KEY`, `DISPATCHER_BUNDLE_PUBKEY` | dispatcher | bundle signing |
 | `RUNQ_TRANSPORT`, `COORD_API_URL`, `COORD_API_CA`, `COORD_API_CERT`, `COORD_API_KEY` | client | queue through the HTTPS API instead of writing the registry |
+
+## Using it from another project
+
+By default the coordinator assumes it lives inside the project whose runs it stores: it finds the
+data root through the repository around its own files and reads its site data from its own tree. A
+project that pins this repository at a commit instead tells it where things are:
+
+```
+export FLEET_DATA_ROOT=/path/to/project/experiments      # registry, snapshots, results
+export FLEET_SITE_DIR=/path/to/project/fleet-site        # capacity/, est_defaults.json, machines.deny
+python /path/to/gpu-fleet-coordinator/fleet/runq.py add --config configs/job.json --group G --name N --by me
+```
+
+Both are read by every tool, so the dispatcher and the client must be started with the same values.
+The tree that is shipped is still the repository containing the config you name, not this one.
+`fleet/owned_box_setup.sh --name NAME` sets what a host's image, container, directories and timer
+are called (default `fleet`); always re-run a host under the name it was set up with.
 
 ## Queueing from another machine
 

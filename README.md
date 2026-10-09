@@ -67,7 +67,8 @@ you ──runq add──▶ registry (SQLite) ◀──poll── dispatcher ─
 - **Being configured.** Settings live in a table of the registry. There is no command to change
   one; you write the row, and eight of them are reset at start if they hold an old default. Compiled
   shipping is on by default, needs a build toolchain, and by default compiles two directories that
-  exist only in the original project. Paths follow one layout (`experiments/` beside the code).
+  exist only in the original project. Data lives in `experiments/` beside the code unless two
+  environment variables say otherwise.
 - **Running anywhere.** Boxes are Linux machines reached as root over ssh, normally Docker
   containers of one fixed PyTorch image. The setup script for an owned box targets Ubuntu with an
   NVIDIA card. Nothing here has been run by anyone but its author.

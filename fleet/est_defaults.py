@@ -30,7 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling imports (fle
 import registry_db  # noqa: E402
 import calibration  # noqa: E402  (reuse read + reconstruction, READ-ONLY)
 
-SIDECAR = Path(__file__).resolve().parent / "est_defaults.json"
+# Site data: `<FLEET_SITE_DIR>/est_defaults.json` when a site directory is named (registry_db.site_file).
+SIDECAR = registry_db.site_file("est_defaults.json", Path(__file__).resolve().parent / "est_defaults.json")
 DEFAULT_MIN_SAMPLE = 5
 STATISTIC = "ceil(p90) of done-task non-degenerate active_minutes"
 
