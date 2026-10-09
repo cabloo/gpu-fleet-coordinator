@@ -555,7 +555,44 @@ def _resume_ckpt_or_error(a: argparse.Namespace, resume_flag: str | None,
     if resume_flag is None:
         print(f"{who}: no resume flag declared — cannot --init-from", file=sys.stderr)
         return None, 2
+    if api_client.enabled():
+        seen_by_coordinator = _path_as_the_coordinator_sees_it(ckpt)
+        if seen_by_coordinator is None:
+            print(f"{who}: --init-from {ckpt} is outside the shared experiments root "
+                  f"{registry_db.shared_experiments_root()}. Over the API transport only the PATH is "
+                  f"sent, and the coordinator reads it on its own filesystem, where it can see nothing "
+                  f"else of this machine: use a checkpoint the fleet pulled back (it lives under that "
+                  f"root), or ship the file inside the code snapshot.", file=sys.stderr)
+            return None, 2
+        ckpt = seen_by_coordinator
     return ckpt, None
+
+
+#: Where the coordinator's own containers mount the shared experiments root
+#: (`fleet/coordinator/docker-compose.yml`: `${COORD_DATA}:/srv/fleet/experiments`). A queuer
+#: on the API transport sees the SAME directory at `registry_db.shared_experiments_root()`.
+COORDINATOR_EXPERIMENTS_ROOT = "/srv/fleet/experiments"
+
+
+def _path_as_the_coordinator_sees_it(queuer_path: str) -> str | None:
+    """A file under the shared experiments root, re-rooted to where the coordinator mounts that root;
+    None for a file anywhere else.
+
+    ⛔ Over the API transport `--init-from` sends a PATH, not bytes, and the dispatcher later does
+    `Path(resume_checkpoint).read_bytes()` on its own filesystem. The queuer's spelling of the shared
+    root (`/workspace/project/experiments` in the devcontainer) does not exist there, so every
+    `--init-from` — even of a checkpoint the fleet itself had pulled back into that root — passed the
+    queue-time check here and died at ship time with "resume checkpoint unreadable by the dispatcher"
+    (twice on 2026-09-29; on 2026-09-20 the same shape took the dispatcher down for ~40 minutes).
+    Re-rooting the path makes a pulled checkpoint usable as another task's starting point on ANY box,
+    which is what `--init-from` is for; refusing everything else turns a ship-time failure into a
+    queue-time one."""
+    root = registry_db.shared_experiments_root().resolve()
+    try:
+        relative = Path(queuer_path).resolve().relative_to(root)
+    except ValueError:
+        return None
+    return str(Path(os.environ.get("COORD_EXPERIMENTS_ROOT", COORDINATOR_EXPERIMENTS_ROOT)) / relative)
 
 
 def _warn_if_no_coordinator(db: str) -> None:
