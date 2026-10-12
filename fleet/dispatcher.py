@@ -803,11 +803,13 @@ BOX_PROBE_CMD = (
     "elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then "
     "awk 'NR==FNR{q=$1;next}{if(q<=0)print \"CPUQ -\";else printf \"CPUQ %.4f\\n\",q/$1}' "
     "/sys/fs/cgroup/cpu/cpu.cfs_quota_us /sys/fs/cgroup/cpu/cpu.cfs_period_us; fi; "
-    # Cumulative container CPU time, microseconds (v1's cpuacct is nanoseconds -> /1000)
+    # Cumulative container CPU time, microseconds (v1's cpuacct is nanoseconds -> /1000). `%.0f`
+    # for the reason the `CPUS` line gives: under mawk `%d` stood still at 2^31 - 1, which is 36
+    # minutes of CPU time, and a counter that stands still is a container that reads idle (25g).
     "if [ -r /sys/fs/cgroup/cpu.stat ]; then "
     "awk '/^usage_usec/{print \"CPUU\", $2}' /sys/fs/cgroup/cpu.stat; "
     "elif [ -r /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then "
-    "awk '{printf \"CPUU %d\\n\",$1/1000}' /sys/fs/cgroup/cpuacct/cpuacct.usage; fi; "
+    "awk '{printf \"CPUU %.0f\\n\",$1/1000}' /sys/fs/cgroup/cpuacct/cpuacct.usage; fi; "
     # Container memory 'current limit' in bytes ('max' = unlimited, v1 uses a huge sentinel)
     "if [ -r /sys/fs/cgroup/memory.current ]; then "
     "echo MEMCG $(cat /sys/fs/cgroup/memory.current) "

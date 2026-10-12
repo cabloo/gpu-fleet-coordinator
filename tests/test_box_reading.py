@@ -9,6 +9,8 @@ tracker, and what is sent to a box that is not due.
 import importlib.util
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -778,6 +780,32 @@ def test_a_shell_that_sees_two_interfaces_gives_no_network_line(tmp_path):
     assert [ln for ln in lines if ln.startswith("CPUS")], "and the CPU lines are still there"
     m = disp.parse_box_probe("\n".join(lines))
     assert (m["net_rx_bytes"], m["net_tx_bytes"]) == (None, None)
+
+
+@_A_BOXS_SHELL
+def test_a_cgroup_v1_boxs_cpu_counter_is_whole_past_two_to_the_31(tmp_path):
+    """Invariant 25g. v1's counter is nanoseconds and the probe divides it. mawk, the awk Debian and
+    Ubuntu ship, stops `%d` at 2^31 - 1, which a container reaches after 36 minutes of CPU time:
+    from then on the counter stood still, the rate read 0.0 and the headroom gate took the
+    container for idle."""
+    v2, v1 = "/sys/fs/cgroup/cpu.stat", "/sys/fs/cgroup/cpuacct/cpuacct.usage"
+    cmd = disp.BOX_PROBE_CMD
+    assert cmd.count(v2) == 2 and cmd.count(v1) == 2, "the test for the file, and the read of it"
+    (tmp_path / "usage").write_text("7200000000000\n")            # two hours of CPU time
+    cmd = cmd.replace(v2, shlex.quote(str(tmp_path / "no_v2_file")))
+    cmd = cmd.replace(v1, shlex.quote(str(tmp_path / "usage")))
+    done = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert [ln for ln in done.stdout.splitlines() if ln.startswith("CPUU")] == ["CPUU 7200000000"]
+    assert disp.parse_box_probe(done.stdout)["cpu_usage_usec"] == 7200000000
+
+
+def test_no_count_in_the_probe_is_printed_with_a_32_bit_format():
+    """Which awk a box has is not ours to choose, so the form is pinned as well as the value: no
+    integer conversion at all, with or without flags and a width (`%5d` and `%i` stop at the same
+    place under mawk)."""
+    assert not re.findall(r"%[-+ #0]*\d*(?:\.\d+)?[diouxXc]", disp.BOX_PROBE_CMD)
+    assert set(re.findall(r"%[-+ #0]*\d*(?:\.\d+)?[a-zA-Z]", disp.BOX_PROBE_CMD)) == {"%s", "%.0f", "%.4f"}
 
 
 @_A_BOXS_SHELL

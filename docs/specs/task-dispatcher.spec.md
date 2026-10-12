@@ -2743,6 +2743,19 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
     f. *`_effective_slots` is now the single composition of the 19h overpack cap and the capacity
        window,* used by both `_instances_view` and the sampled payload — so the packer and the
        panel can never disagree about how big a box currently is.
+    g. *A count is printed whole (2026-10-12).* cgroup v1's counter is nanoseconds, and the probe
+       divides it by 1,000 in awk. Printed with `%d`, mawk (the awk Debian and Ubuntu ship) stops
+       at 2^31 - 1: 2,147 seconds of CPU time, which a container on four cores reaches in nine
+       minutes. From then on the counter stood still, `_cpu_used_cores` read 0.0 (not `None`: the
+       counter had not gone backwards), and the headroom gate (28) took the pair (quota, 0.0), a
+       container burning nothing. The per-lane learning of 26 and the utilisation the panel
+       shows read the same 0.0. Every count the probe WORKS OUT is printed with `%.0f` (this
+       one, and the lines of 31f); the rest are printed as read. Found by a reading of 31f's
+       diff, not by a failure seen live: it takes a v1 box whose awk is mawk (seen on mawk
+       1.3.4; gawk prints the count whole either way). On a box that had stopped, the first
+       measure after this differences the true count against the stuck one: one figure far too
+       high, which can keep new work off that box for one measure period, and right from the
+       next.
 
 26. **IN-FLIGHT PER-LANE RESOURCE RECALIBRATION (2026-07-31).** Every SIZING and ADMISSION decision
     uses a MEASURED per-lane footprint (`res_defaults.learn_lane_footprint`, pure) layered over the
@@ -3548,7 +3561,9 @@ them — their offers are ranked purely by cores-per-$. The gates themselves are
   space after the colon) and give the sums worked out by hand; a table of two interfaces, of
   loopback alone or of nothing gives no `NET` line; the row holds the four fields and the
   `box_measured` event still does not; the `box_probe` event holds them all but the per-core
-  table.
+  table. 25g: the probe string, run in a real shell with no v2 file and a recorded v1 counter of
+  two hours of CPU time, gives that count whole; and the string holds no integer format at all
+  (`%d`, `%i`, with or without a width).
 - **Paid end-to-end smoke — RUN 2026-07-08, real Vast box, total spend $0.39** (GTX 1660,
   $0.041/hr, instance 40000004): `runq add` a low-priority task, ran it to mid-flight, rented
   correctly (bootstrap ssh probe + payload ship + `spool_worker.py` start all for real), then
