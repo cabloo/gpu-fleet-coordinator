@@ -81,6 +81,9 @@ Every metric is a gauge unless marked counter. A value that was not measured is 
 | `fleet_box_pressure_waiting_seconds_total` (counter) | same + `resource` | time some task on the box's HOST waited for `cpu`, `memory` or `io` (the machine's, not the container's: task-dispatcher inv. 31b says why) |
 | `fleet_box_pressure_stalled_seconds_total` (counter) | same + `resource` | time every task on the host waited, for `memory` and `io` |
 | `fleet_box_disk_total_bytes`, `_disk_free_bytes` | same | the filesystem the box's spool is on |
+| `fleet_box_cpu_busy_seconds_total` (counter) | same | CPU time the box's whole MACHINE spent on anything but idling and waiting for I/O (task-dispatcher inv. 31f). Its change between two instants over the change of `fleet_box_measured_timestamp_seconds` between the same two is how many of the machine's CPUs were busy, whoever kept them busy. (It moves only when a reading is written, so a rate against the scraper's clock over a few readings is not exact.) `fleet_box_cpu_used_cores` is the worker's own share |
+| `fleet_box_cpu_core_busy_seconds_total` (counter) | same + `core` | that time for each core, by its number, for a box whose `source` is `owned`. A rented machine's cores are its host's, shared with other renters, and every rental is a new box. Read as the line above, it is the share of that core that was busy. The lowest 1,024 core numbers of a box |
+| `fleet_box_network_receive_bytes_total`, `_network_transmit_bytes_total` (counters) | same | bytes on the one interface the box's WORKER sees beside loopback: the worker's own traffic, not the machine's. A box whose probe sees several interfaces has none (inv. 31f) |
 | `fleet_box_slots_effective`, `_tasks_running`, `_tasks_open` | same | the cap the packer used, and the box's tasks, at the reading |
 | `fleet_events_total` (counter) | `event` | events appended since the exporter started; the names of invariant 4 are present from the first scrape, at 0 |
 | `fleet_registry_last_event_seq` | | the newest event row the exporter has read |
@@ -118,8 +121,9 @@ Every metric is a gauge unless marked counter. A value that was not measured is 
 6. **A box that leaves takes its series with it.** Only instances whose state is neither
    `destroyed` nor `lost` are served. A reading row whose box is gone is ignored.
 7. **Labels carry registry names and nothing else:** a box's `label`, its id, its `source`, a task
-   state, an event name, a phase name. A state, event or phase name that is not
-   `[a-z0-9_]{1,48}` is counted under `other`. No task name, group, entry point, argument or path
+   state, an event name, a phase name, a core's number. A state, event or phase name that is not
+   `[a-z0-9_]{1,48}` is counted under `other`; a core that is not a number of at most four digits,
+   written without a leading zero, is left out. No task name, group, entry point, argument or path
    is ever a label or a value: arguments can hold secrets. (The reading rows hold none of these:
    the dispatcher leaves the two fields that name somebody's work out of them.)
 8. **One scrape is one snapshot:** its queries run in a single read transaction.
@@ -142,7 +146,10 @@ two are skipped when the suite runs as root, which can write anywhere); a lookba
 one scrape's rows counts none of them; a registry replaced by another is a first look again; the
 twelve names are at 0 from the first scrape and every one is logged by the coordinator as an
 event; a number too large for a float costs only itself; `HEAD` answers as `GET` does, without
-the text.
+the text. The full reading holds the machine's CPU time, three cores and the worker's network bytes,
+served as seconds and bytes; a core whose name is not a number, a negative count and a per-core
+field that is not a table each cost only themselves; cores are served in number order; a rented
+box's reading serves the machine's time and no core.
 
 ## Open questions
 None.

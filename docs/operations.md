@@ -167,6 +167,27 @@ the dispatcher then sends each owned box the probe alone and writes its reading,
 else with the answer. What that costs shows in the `measure` phase of
 `fleet_poll_phase_seconds`. The metric names are in `docs/specs/metrics-exporter.spec.md`.
 
+Most of a box's reading is the whole machine's, because a container reads the host's counters:
+CPU time (`fleet_box_cpu_busy_seconds_total`, and the same for each core), load, pressure and
+memory available. The network bytes are not: where the worker has its own network namespace,
+which is how the setup script starts it, they are the worker's own traffic. For a machine's whole
+traffic, run a reader on the host. A box whose probe sees more than one interface beside loopback
+(one registered bare, or a worker on the host's network) has no network reading: a sum over
+several interfaces counts a byte more than once. A box that is itself a virtual machine reads the
+virtual machine's CPUs. Each core's time is served for the boxes you own, not for rented ones.
+
+These counters move once a reading, not once a scrape. For a figure per second, divide a counter's
+change between two instants by the change of `fleet_box_measured_timestamp_seconds` between the
+same two:
+
+    ((fleet_box_cpu_busy_seconds_total - fleet_box_cpu_busy_seconds_total offset 5m) >= 0)
+      / on(label, instance_id)
+    ((fleet_box_measured_timestamp_seconds - fleet_box_measured_timestamp_seconds offset 5m) > 0)
+
+That is exact, and it has no value where the counter started again or no reading came. A plain
+`rate()` divides by the scraper's clock: over a window that holds one reading it reads anywhere
+from nothing to a third too much.
+
 ## Add a machine you own
 
 A box is a Linux machine the coordinator reaches as root over ssh, normally a Docker container of

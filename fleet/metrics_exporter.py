@@ -28,6 +28,9 @@ EVENT_BATCH = 5000
 MAX_BATCHES_PER_SCRAPE = 40          # inv. 2: at most 200,000 event rows a scrape
 # Inv. 7: what may become a label value. Anything else is counted under `other`.
 _NAME = re.compile(r"[a-z0-9_]{1,48}\Z")
+# Inv. 7 again: a core is its number as the reading row writes it, and a row's cores are capped.
+_CORE = re.compile(r"(0|[1-9][0-9]{0,3})\Z")
+MAX_CORES_PER_BOX = 1024
 GIB = 1024.0 ** 3
 
 # The task state machine's states (run-registry spec). Listed here so every one is served, at 0
@@ -82,6 +85,10 @@ _HELP = {
     "fleet_box_gpu_throttled": ("gauge", "1 while the GPU reports this reason for running below its clocks."),
     "fleet_box_pressure_waiting_seconds_total": ("counter", "Time some task on the box's host waited for the resource."),
     "fleet_box_pressure_stalled_seconds_total": ("counter", "Time every task on the box's host waited for the resource."),
+    "fleet_box_cpu_busy_seconds_total": ("counter", "CPU time the box's whole machine spent on anything but idling and waiting for I/O."),
+    "fleet_box_cpu_core_busy_seconds_total": ("counter", "That time, for each core of a machine the site owns."),
+    "fleet_box_network_receive_bytes_total": ("counter", "Bytes received on the one interface the box's worker sees beside loopback."),
+    "fleet_box_network_transmit_bytes_total": ("counter", "Bytes sent on the one interface the box's worker sees beside loopback."),
     "fleet_events_total": ("counter", "Events appended to the registry since the exporter started."),
     "fleet_registry_last_event_seq": ("gauge", "The newest event row the exporter has read."),
 }
@@ -96,6 +103,12 @@ def _number(value) -> float | None:
     except OverflowError:                # an integer too large for a float
         return None
     return value if value == value and value not in (float("inf"), float("-inf")) else None
+
+
+def _count(value) -> float | None:
+    """A counter's value: a finite number that is not negative, or None."""
+    value = _number(value)
+    return value if value is not None and value >= 0 else None
 
 
 def _epoch(text) -> float | None:
@@ -281,6 +294,24 @@ class Exporter:
                     usec = _number(psi.get(key))
                     if usec is not None:
                         emit(f"fleet_box_pressure_{kind}_seconds_total", usec / 1e6, labels + (("resource", resource),))
+        for labels, reading in got:
+            usec = _count(reading.get("host_cpu_busy_usec"))
+            if usec is not None:
+                emit("fleet_box_cpu_busy_seconds_total", usec / 1e6, labels)
+        # A rented machine's cores are its host's, shared with other renters, and every rental is a
+        # new box: its cores would be hundreds of series nobody reads. The machine's whole time,
+        # just above, is served for every box.
+        owned = {i for i, _label, _state, source, _gpu, _slots in present if source == "owned"}
+        for labels, reading in got:
+            per_core = reading.get("host_cpu_core_busy_usec") if labels[1][1] in owned else None
+            names = [c for c in per_core if isinstance(c, str) and _CORE.match(c)] if isinstance(per_core, dict) else []
+            for core in sorted(names, key=int)[:MAX_CORES_PER_BOX]:
+                usec = _count(per_core[core])
+                if usec is not None:
+                    emit("fleet_box_cpu_core_busy_seconds_total", usec / 1e6, labels + (("core", core),))
+        for field, way in (("net_rx_bytes", "receive"), ("net_tx_bytes", "transmit")):
+            for labels, reading in got:
+                emit(f"fleet_box_network_{way}_bytes_total", _count(reading.get(field)), labels)
 
         for name in sorted(self._counts):
             emit("fleet_events_total", self._counts[name], (("event", name),))

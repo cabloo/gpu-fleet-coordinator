@@ -3256,6 +3256,44 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
        What it costs is on the record: the calls run inside the `measure` phase that 23 times.
     e. *A box that leaves takes its row with it.* On every pass, a row whose box is no longer
        `live` or `paused` is deleted.
+    f. *The machine's CPU time, and the worker's network bytes (2026-10-12).* A status page for a
+       box wants five things side by side: GPU, CPU, memory, disk and network. The reading had no
+       figure for how busy the whole machine is (`load1` counts waiting tasks, `cpu_used_cores` is
+       the worker's own share), nothing per core, and nothing about the network. Three more keyed
+       lines, optional and null like those of (b), and kept in the reading row only (c):
+       - `CLKTCK`: the kernel's clock ticks a second, as `getconf CLK_TCK` gives it.
+       - `CPUS`, one line for the whole machine (`cpu`) and one for each core (`cpuN`): user,
+         nice, system, irq, softirq and steal of `/proc/stat` summed, in ticks. Not idle or
+         iowait, and not the two guest fields, which the kernel has already counted inside user
+         and nice. The row holds them as microseconds: `host_cpu_busy_usec`, and
+         `host_cpu_core_busy_usec`, a table from the core's number to its time. These are the
+         HOST's on purpose, like the pressure lines: a container started on the machine reads the
+         machine's `/proc/stat`. (A box that is itself a virtual machine reads the virtual
+         machine's CPUs, and a container runtime that hides the host's `/proc` gives the
+         container's.) Without a usable `CLKTCK` (a whole number from 1 to 100,000) there is no
+         CPU time at all: ticks mean nothing without their rate, and a guessed one would be a
+         wrong number drawn as a right one. A row keeps the first 1,024 cores the probe lists
+         (the kernel lists them in number order), and a core is `cpu` and at most four digits. A
+         count over 2^53 is not kept: a float no longer holds it exactly.
+       - `NET`: bytes received and sent on the ONE interface the probe's shell sees beside
+         loopback (`net_rx_bytes`, `net_tx_bytes`). A worker in its own network namespace has
+         exactly one, so on such a box this is the WORKER's traffic (results, checkpoints, code
+         going in), not the machine's. The machine's whole traffic cannot be read from inside
+         that namespace; a site that wants it runs a reader on the host. A shell that sees
+         several interfaces (a box registered bare, a worker on the host's network, a container
+         runtime inside the worker) gives no line. The same byte is counted on every interface it
+         crosses, and a sum over several falls when one of them goes away, which the consumer of
+         a counter reads as a restart and counts as new traffic. No number is better than that
+         one.
+       All four are counters that start again when the machine (or the worker) does, and they
+       move only when a reading is written. A consumer therefore divides a counter's change
+       between two instants by the change of the reading's own time (`at`) between the same two,
+       which is exact. A rate against the consumer's own clock over a window of a few readings is
+       not: with a reading a minute, a core busy all the time reads anywhere from 0 to 1.3 over
+       one minute. The
+       on-demand probe's `box_probe` event (c) holds the machine's CPU time and the network
+       bytes and leaves the per-core table out: an event row is kept for ever, and a person
+       reads it.
 
 ## Fixtures
 
@@ -3499,7 +3537,18 @@ them — their offers are ranked purely by cores-per-$. The gates themselves are
   `box_reading_every_min` at 0 nothing is sent between full probes; at 1 an owned box gets
   `BOX_PROBE_CMD` alone, no event, no `_box_res` change, no tracker count, and a rented box gets
   nothing; a failing box is skipped; a failed or unparseable reading leaves the old row; an ssh
-  that raises does not raise out of the pass; a destroyed box's row is deleted.
+  that raises does not raise out of the pass; a destroyed box's row is deleted. 31f: the three
+  lines parse to microseconds and bytes, and a probe without them parses exactly as before; no
+  tick rate, or one that is not a whole number in range, is no CPU time; a core that is not
+  `cpuN`, a count that is not a number and a second `cpu` line cost only themselves; at most
+  1,024 cores are kept; the probe string, run in a real shell on this machine, gives a `CLKTCK`,
+  a `cpu` line and one `cpuN` line a core that all parse, and a `NET` line exactly when this
+  machine has one interface beside loopback; the two awk programs are run on a recorded
+  `/proc/stat` and a recorded `/proc/net/dev` (loopback, and one interface whose count has no
+  space after the colon) and give the sums worked out by hand; a table of two interfaces, of
+  loopback alone or of nothing gives no `NET` line; the row holds the four fields and the
+  `box_measured` event still does not; the `box_probe` event holds them all but the per-core
+  table.
 - **Paid end-to-end smoke — RUN 2026-07-08, real Vast box, total spend $0.39** (GTX 1660,
   $0.041/hr, instance 40000004): `runq add` a low-priority task, ran it to mid-flight, rented
   correctly (bootstrap ssh probe + payload ship + `spool_worker.py` start all for real), then

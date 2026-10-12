@@ -780,6 +780,22 @@ BOX_PROBE_CMD = (
     "awk -v r=$r '{split($5,a,\"=\");print \"PSI\",r,$1,a[2]}' /proc/pressure/$r 2>/dev/null; done; "
     # The filesystem the spool is on (the home directory's, before there is a spool): size, free, KB.
     "df -Pk ~/spool ~ 2>/dev/null | awk 'NR==2{print \"DISK\", $2, $4}'; "
+    # Invariant 31f. The machine's CPU time, whole (`cpu`) and for each core (`cpuN`): user, nice,
+    # system, irq, softirq and steal of /proc/stat, in clock ticks, with the tick rate on its own
+    # line. Not idle or iowait, and not the two guest fields: the kernel has already counted those
+    # inside user and nice. A container reads the HOST's lines there, which is the point: how busy
+    # the whole machine is, whoever keeps it busy. `%.0f`, never `%d`: mawk, the awk Debian and
+    # Ubuntu ship, stops `%d` at 2^31.
+    "echo CLKTCK $(getconf CLK_TCK 2>/dev/null); "
+    "awk '/^cpu/{b=$2+$3+$4+$7+$8+$9;printf \"CPUS %s %.0f\\n\",$1,b}' /proc/stat 2>/dev/null; "
+    # Bytes in and out on the ONE interface this shell sees beside loopback, which is what a worker
+    # in its own network namespace has. A shell that sees several gives no line: a byte is counted
+    # on every interface it crosses (a card, a bridge, a container's end), and their sum FALLS
+    # when one of them goes away, which a consumer reads as a counter that started again. The
+    # colon after the name is replaced first: the kernel prints no space after it once the count
+    # is long.
+    "awk 'NR>2{sub(/:/,\" \");if($1!=\"lo\"){n++;rx+=$2;tx+=$10}}"
+    "END{if(n==1)printf \"NET %.0f %.0f\\n\",rx,tx}' /proc/net/dev 2>/dev/null; "
     # CPU quota in cores ('-' when unlimited/unreadable -> the host core count stands in)
     "if [ -r /sys/fs/cgroup/cpu.max ]; then "
     "awk '{if($1==\"max\")print \"CPUQ -\";else printf \"CPUQ %.4f\\n\",$1/$2}' "
@@ -897,6 +913,12 @@ def _probe_reading(tok: str) -> float | None:
 
 _PROBE_MASK_RE = re.compile(r"0[xX][0-9a-fA-F]{1,16}\Z")
 _PSI_KEYS = {"cpu": "cpu", "memory": "mem", "io": "io"}
+# Invariant 31f. A box's answer is not trusted to be small: a core is `cpu` and at most four digits,
+# a row keeps at most this many of them, and a count past 2^53 is not one a float carried exactly.
+_PROBE_CORE_RE = re.compile(r"cpu[0-9]{1,4}\Z")
+_PROBE_MAX_CORES = 1024
+_PROBE_MAX_CLK_TCK = 100000.0
+_PROBE_MAX_COUNT = float(1 << 53)
 
 
 def _probe_mask(tok: str) -> int | None:
@@ -935,6 +957,7 @@ def parse_box_probe(text: str) -> dict | None:
     gpu_lines: list = []
     gpux_lines: list = []
     psi_lines: list = []
+    cpus_lines: list = []
     for ln in (text or "").splitlines():
         parts = ln.strip().split()
         if not parts:
@@ -945,7 +968,10 @@ def parse_box_probe(text: str) -> dict | None:
             gpux_lines.append(" ".join(parts[1:]))
         elif parts[0] == "PSI":
             psi_lines.append(parts[1:])
-        elif parts[0] in ("NPROC", "LOAD", "MEM", "CPUQ", "CPUU", "MEMCG", "MEMANON", "DISK"):
+        elif parts[0] == "CPUS":
+            cpus_lines.append(parts[1:])
+        elif parts[0] in ("NPROC", "LOAD", "MEM", "CPUQ", "CPUU", "MEMCG", "MEMANON", "DISK",
+                          "CLKTCK", "NET"):
             keyed.setdefault(parts[0], parts[1:])
     try:
         cores = int(float(keyed["NPROC"][0]))
@@ -962,7 +988,10 @@ def parse_box_probe(text: str) -> dict | None:
            "mem_limit_gb": None, "mem_used_gb": None, "mem_anon_gb": None,
            # invariant 31b — read for the box's reading row; nothing admits on them
            "gpu_temp_c": None, "gpu_power_w": None, "gpu_power_limit_w": None, "gpu_throttle": None,
-           "psi": None, "disk_total_gb": None, "disk_free_gb": None}
+           "psi": None, "disk_total_gb": None, "disk_free_gb": None,
+           # invariant 31f — the machine's CPU time and the worker's network bytes, same standing
+           "host_cpu_busy_usec": None, "host_cpu_core_busy_usec": None,
+           "net_rx_bytes": None, "net_tx_bytes": None}
     # First PARSEABLE GPU row wins, and the frozen fields stay first-GPU (never a sum) so a
     # multi-GPU box's VRAM gate keeps admitting exactly as it did; `gpu_count` reports the rest.
     parsed_gpus = 0
@@ -1025,6 +1054,27 @@ def parse_box_probe(text: str) -> dict | None:
         if total:
             out["disk_total_gb"] = total / (1024.0 ** 2)
             out["disk_free_gb"] = None if free is None else free / (1024.0 ** 2)
+    # Invariant 31f. Ticks mean nothing without the tick rate, so no rate is no CPU time at all.
+    hz = _probe_reading(keyed["CLKTCK"][0]) if keyed.get("CLKTCK") else None
+    if hz is not None and 1.0 <= hz <= _PROBE_MAX_CLK_TCK and hz == int(hz):
+        per_core: dict = {}
+        for toks in cpus_lines:
+            ticks = _probe_reading(toks[1]) if len(toks) == 2 else None
+            if ticks is None or ticks > _PROBE_MAX_COUNT:
+                continue
+            usec = int(ticks) * 1_000_000 // int(hz)
+            if toks[0] == "cpu":
+                if out["host_cpu_busy_usec"] is None:
+                    out["host_cpu_busy_usec"] = usec
+            elif _PROBE_CORE_RE.match(toks[0]) and len(per_core) < _PROBE_MAX_CORES:
+                per_core.setdefault(str(int(toks[0][3:])), usec)
+        out["host_cpu_core_busy_usec"] = per_core or None
+    if "NET" in keyed:
+        toks = keyed["NET"]
+        rx = _probe_reading(toks[0]) if toks else None
+        tx = _probe_reading(toks[1]) if len(toks) > 1 else None
+        out["net_rx_bytes"] = None if rx is None or rx > _PROBE_MAX_COUNT else int(rx)
+        out["net_tx_bytes"] = None if tx is None or tx > _PROBE_MAX_COUNT else int(tx)
     return out
 
 
@@ -4812,7 +4862,10 @@ class Dispatcher:
                 detail["rc"] = rc
                 detail["reachable"] = bool(rc == 0 and measured is not None)
                 if measured is not None:
-                    detail["measured"] = measured
+                    # 31f: an event row is kept for ever and a person reads it. One cumulative
+                    # count a core tells them nothing; the reading row holds the table.
+                    detail["measured"] = {key: value for key, value in measured.items()
+                                          if key != "host_cpu_core_busy_usec"}
                 else:
                     detail["error"] = ((getattr(proc, "stderr", "") or "").strip()[-400:]
                                        or "probe ran but its output was unparseable")
@@ -4956,12 +5009,16 @@ class Dispatcher:
             except (ValueError, TypeError, KeyError, OverflowError):
                 rate = None  # no row yet, or one somebody edited by hand
             psi = m.get("psi")
+            per_core = m.get("host_cpu_core_busy_usec")
             reading.update(
                 at=round(at, 1), cpu_used_cores=r(rate, 2),
                 gpu_temp_c=r(m.get("gpu_temp_c"), 0), gpu_power_w=r(m.get("gpu_power_w"), 1),
                 gpu_power_limit_w=r(m.get("gpu_power_limit_w"), 1), gpu_throttle=m.get("gpu_throttle"),
                 psi=dict(psi) if isinstance(psi, dict) else None,
-                disk_total_gb=r(m.get("disk_total_gb"), 1), disk_free_gb=r(m.get("disk_free_gb"), 1))
+                disk_total_gb=r(m.get("disk_total_gb"), 1), disk_free_gb=r(m.get("disk_free_gb"), 1),
+                host_cpu_busy_usec=m.get("host_cpu_busy_usec"),
+                host_cpu_core_busy_usec=dict(per_core) if isinstance(per_core, dict) else None,
+                net_rx_bytes=m.get("net_rx_bytes"), net_tx_bytes=m.get("net_tx_bytes"))
             self.conn.execute(
                 "INSERT INTO settings(key, value) VALUES (?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

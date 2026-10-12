@@ -56,6 +56,9 @@ READING_GPU = {
     "psi": {"cpu_some": 2_500_000, "mem_some": 1_000_000, "mem_full": 500_000,
             "io_some": 250_000, "io_full": None},
     "disk_total_gb": 1007.0, "disk_free_gb": 250.5,
+    # Microseconds and bytes (task-dispatcher inv. 31f). The cores are out of order on purpose.
+    "host_cpu_busy_usec": 1234560000, "host_cpu_core_busy_usec": {"10": 34560000, "0": 600000000, "2": 600000000},
+    "net_rx_bytes": 5000000, "net_tx_bytes": 7000000,
     "slots_total": 16, "slots_eff": 12, "running": 10, "open": 11,
     "ep": "a/secret/entry_point.py", "grp": "a_private_group",
 }
@@ -219,6 +222,12 @@ def test_the_exact_text_for_a_small_registry(registry):
         f'fleet_box_pressure_waiting_seconds_total{{{box1},resource="memory"}} 1',
         f'fleet_box_pressure_waiting_seconds_total{{{box1},resource="io"}} 0.25',
         f'fleet_box_pressure_stalled_seconds_total{{{box1},resource="memory"}} 0.5',
+        f"fleet_box_cpu_busy_seconds_total{{{box1}}} 1234.56",
+        f'fleet_box_cpu_core_busy_seconds_total{{{box1},core="0"}} 600',       # by number, not by text
+        f'fleet_box_cpu_core_busy_seconds_total{{{box1},core="2"}} 600',
+        f'fleet_box_cpu_core_busy_seconds_total{{{box1},core="10"}} 34.56',
+        f"fleet_box_network_receive_bytes_total{{{box1}}} 5000000",
+        f"fleet_box_network_transmit_bytes_total{{{box1}}} 7000000",
         *QUIET,
         f"fleet_registry_last_event_seq {newest}",
     ]
@@ -240,6 +249,8 @@ def test_every_metric_is_declared_once_and_its_samples_stay_together(registry):
     kinds = dict(line.split()[2:4] for line in lines if line.startswith("# TYPE"))
     assert {name for name, kind in kinds.items() if kind == "counter"} == {
         "fleet_box_pressure_waiting_seconds_total", "fleet_box_pressure_stalled_seconds_total",
+        "fleet_box_cpu_busy_seconds_total", "fleet_box_cpu_core_busy_seconds_total",
+        "fleet_box_network_receive_bytes_total", "fleet_box_network_transmit_bytes_total",
         "fleet_events_total"}
     # A gauge is not named like a counter (the convention a metrics linter holds a source to).
     assert not [name for name, kind in kinds.items() if kind == "gauge" and name.endswith("_total")]
@@ -369,6 +380,72 @@ def test_a_value_that_is_not_a_plain_number_costs_only_itself(registry):
     # A state beyond the state machine is served by its name; one that cannot be a label, under `other`.
     assert 'fleet_tasks{state="held_by_hand"} 1' in lines and 'fleet_tasks{state="other"} 1' in lines
     assert 'fleet_tasks{state="done"} 0' in lines and 'fleet_tasks{state="running"} 2' in lines
+
+
+def _with_reading(registry, **fields):
+    conn = registry_db.connect(str(registry))
+    _setting(conn, "box_reading_i-1", dict(READING_GPU, **fields))
+    conn.commit()
+    conn.close()
+    return _samples(_exporter(registry).collect())
+
+
+def _cores(lines):
+    return [line for line in lines if line.startswith("fleet_box_cpu_core_busy_seconds_total")]
+
+
+def test_a_cpu_or_network_count_that_is_not_one_costs_only_itself(registry):
+    box1 = 'label="laptop-gpu",instance_id="-1"'
+    lines = _with_reading(
+        registry, host_cpu_busy_usec=-5, net_rx_bytes=-1, net_tx_bytes=float("nan"),
+        host_cpu_core_busy_usec={
+            "0": 1000000, "2": 2500000,
+            "x": 5, "01": 5, "12345": 5, "-1": 5, "": 5, '0",evil="1': 5,     # not a core's number
+            "3": -1, "4": "7", "5": True, "6": None, "7": 10 ** 400})        # not a count
+    assert _cores(lines) == [
+        f'fleet_box_cpu_core_busy_seconds_total{{{box1},core="0"}} 1',
+        f'fleet_box_cpu_core_busy_seconds_total{{{box1},core="2"}} 2.5']
+    assert not [line for line in lines if line.startswith(("fleet_box_cpu_busy_seconds_total", "fleet_box_network_"))]
+    assert not [line for line in lines if "evil" in line]
+    assert f"fleet_box_gpu_power_watts{{{box1}}} 140" in lines, "the reading's other values are still served"
+
+
+@pytest.mark.parametrize("not_a_table", [["0", 5], "0: 5", 7, None, True])
+def test_a_per_core_field_that_is_not_a_table_serves_no_core(registry, not_a_table):
+    box1 = 'label="laptop-gpu",instance_id="-1"'
+    lines = _with_reading(registry, host_cpu_core_busy_usec=not_a_table)
+    assert _cores(lines) == []
+    assert f"fleet_box_cpu_busy_seconds_total{{{box1}}} 1234.56" in lines, "the whole machine's time is its own field"
+    assert f"fleet_box_network_receive_bytes_total{{{box1}}} 5000000" in lines
+
+
+def test_at_most_1024_cores_a_box_are_served_the_lowest_numbers_first(registry):
+    lines = _with_reading(registry, host_cpu_core_busy_usec={str(n): (n + 1) * 1000000 for n in range(1100)})
+    served = _cores(lines)
+    assert len(served) == exporter_mod.MAX_CORES_PER_BOX == 1024
+    assert served[0].endswith('core="0"} 1') and served[-1].endswith('core="1023"} 1024')
+
+
+def test_a_rented_boxs_cores_are_not_served_and_its_whole_machine_time_is(registry):
+    """A rented machine's cores are its host's, shared with other renters, and every rental is a
+    new box: hundreds of series nobody reads. Its whole-machine time is one series."""
+    conn = registry_db.connect(str(registry))
+    _box(conn, 40000002, "runq_rented", "live", source="vast")
+    _setting(conn, "box_reading_i40000002", READING_GPU)
+    conn.commit()
+    conn.close()
+    lines = _samples(_exporter(registry).collect())
+    rented = 'label="runq_rented",instance_id="40000002"'
+    assert f"fleet_box_cpu_busy_seconds_total{{{rented}}} 1234.56" in lines
+    assert f"fleet_box_network_receive_bytes_total{{{rented}}} 5000000" in lines
+    assert len(_cores(lines)) == 3 and not [line for line in _cores(lines) if "runq_rented" in line]
+
+
+def test_a_reading_from_before_the_cpu_and_network_fields_serves_none_of_them(registry):
+    """READING_NO_GPU has none of the four: an older dispatcher's row, or a box that could not say."""
+    lines = _samples(_exporter(registry).collect())
+    new = [line for line in lines if line.startswith(("fleet_box_cpu_busy", "fleet_box_cpu_core", "fleet_box_network"))]
+    assert new and not [line for line in new if "tower" in line]
 
 
 def test_a_scrape_changes_no_byte_of_the_registry(registry):

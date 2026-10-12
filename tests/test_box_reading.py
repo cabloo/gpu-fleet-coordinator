@@ -315,6 +315,22 @@ def test_the_on_demand_probe_reports_the_new_fields_and_writes_no_row(tmp_path):
     assert _row(d) is None
 
 
+def test_the_on_demand_probes_event_leaves_the_per_core_table_out(tmp_path):
+    """31f. An event row is kept for ever and a person reads it: one count a core tells them
+    nothing. The machine's time and the network bytes are there."""
+    d, _ = _mk(tmp_path, _Run(PROBE_31F))
+    d._sync_ssh_config = lambda: None
+    d.conn.execute("INSERT INTO settings(key, value) VALUES ('probe_request_i-1', '1')")
+    d.conn.commit()
+    d._consume_box_probes()
+    (detail,) = [json.loads(detail) for event, detail in _events(d) if event == "box_probe"]
+    measured = detail["measured"]
+    assert "host_cpu_core_busy_usec" not in measured
+    assert (measured["host_cpu_busy_usec"], measured["net_rx_bytes"], measured["net_tx_bytes"]) == \
+           (1234560000, 5000000, 7000000)
+    assert measured["cores"] == 20 and measured["gpu_temp_c"] == 71.0, "and nothing else is left out"
+
+
 @pytest.mark.parametrize("ago_s,rate", [(100, 5.0), (890, 5.0), (1000, None), (-50, None)])
 def test_the_rows_cpu_rate_is_against_the_row_it_replaces(tmp_path, ago_s, rate):
     """31a: and a row older than 15 minutes (or from the future) is no predecessor."""
@@ -570,3 +586,249 @@ def test_the_exporter_reads_what_the_dispatcher_writes(tmp_path):
                  f'fleet_box_pressure_stalled_seconds_total{{{box},resource="io"}} 0.125',
                  f"fleet_box_cores{{{box}}} 20"):
         assert line in text.splitlines(), line
+
+
+# ---------------------------------------------------------------------------------------------
+# 31f: the machine's CPU time and the worker's network bytes
+# ---------------------------------------------------------------------------------------------
+LINES_31F = ("CLKTCK 100\n"
+             "CPUS cpu 123456\nCPUS cpu0 60000\nCPUS cpu1 63456\n"
+             "NET 5000000 7000000\n")
+PROBE_31F = PROBE + LINES_31F
+KEYS_31F = ("host_cpu_busy_usec", "host_cpu_core_busy_usec", "net_rx_bytes", "net_tx_bytes")
+
+
+def _cpu_net(m):
+    return tuple(m[key] for key in KEYS_31F)
+
+
+def test_cpu_time_and_network_bytes_parse():
+    m = disp.parse_box_probe(PROBE_31F)
+    assert _cpu_net(m) == (1234560000, {"0": 600000000, "1": 634560000}, 5000000, 7000000)
+    assert all(type(v) is int for v in (m["host_cpu_busy_usec"], m["net_rx_bytes"], m["net_tx_bytes"]))
+    assert all(type(v) is int for v in m["host_cpu_core_busy_usec"].values()), "counts, never floats"
+
+
+def test_a_probe_without_the_31f_lines_parses_exactly_as_before():
+    old, new = disp.parse_box_probe(PROBE), disp.parse_box_probe(PROBE_31F)
+    assert _cpu_net(old) == (None, None, None, None)
+    assert {k: v for k, v in new.items() if k not in KEYS_31F} == \
+           {k: v for k, v in old.items() if k not in KEYS_31F}
+
+
+@pytest.mark.parametrize("tick_line", [
+    "", "CLKTCK\n", "CLKTCK 0\n", "CLKTCK 99.5\n", "CLKTCK 1000000\n", "CLKTCK nan\n", "CLKTCK -100\n",
+    "CLKTCK fast\n"])
+def test_without_a_usable_tick_rate_there_is_no_cpu_time(tick_line):
+    """Ticks mean nothing without their rate, and a guessed rate is a wrong number drawn as right."""
+    m = disp.parse_box_probe(PROBE + tick_line + "CPUS cpu 123456\nCPUS cpu0 60000\nNET 5 7\n")
+    assert _cpu_net(m) == (None, None, 5, 7), "and the network line does not depend on it"
+    assert m["cores"] == 20 and m["gpu_temp_c"] == 71.0, "the rest of the probe is untouched"
+
+
+def test_another_tick_rate_scales_the_time():
+    m = disp.parse_box_probe(PROBE + "CLKTCK 250\nCPUS cpu 1000\nCPUS cpu3 500\n")
+    assert _cpu_net(m) == (4000000, {"3": 2000000}, None, None)
+
+
+@pytest.mark.parametrize("lines,whole,cores", [
+    ("CPUS cpu prose\nCPUS cpu0 5\n", None, {"0": 50000}),
+    ("CPUS cpu 7\nCPUS cpu 9\n", 70000, None),                       # the first whole-machine line
+    ("CPUS cpu0 5\nCPUS cpu0 9\n", None, {"0": 50000}),               # and the first of a core
+    ("CPUS cpux 5\nCPUS gpu0 5\nCPUS cpu00000 5\nCPUS cpu-1 5\n", None, None),
+    ("CPUS cpu007 5\n", None, {"7": 50000}),                          # a core is its number
+    ("CPUS cpu0\nCPUS cpu1 5 6\nCPUS\n", None, None),                 # not `name ticks`
+    ("CPUS cpu0 -5\nCPUS cpu1 nan\nCPUS cpu2 1e300\nCPUS cpu3 4\n", None, {"3": 40000}),
+])
+def test_a_cpu_line_that_is_not_a_reading_costs_only_itself(lines, whole, cores):
+    m = disp.parse_box_probe(PROBE + "CLKTCK 100\n" + lines)
+    assert (m["host_cpu_busy_usec"], m["host_cpu_core_busy_usec"]) == (whole, cores)
+
+
+def test_a_row_keeps_at_most_1024_cores():
+    lines = "".join(f"CPUS cpu{n} {n + 1}\n" for n in range(1100))
+    cores = disp.parse_box_probe(PROBE + "CLKTCK 100\n" + lines)["host_cpu_core_busy_usec"]
+    assert len(cores) == disp._PROBE_MAX_CORES == 1024 and cores["0"] == 10000 and "1024" not in cores
+
+
+@pytest.mark.parametrize("line,expect", [
+    ("NET 5\n", (5, None)),
+    ("NET\n", (None, None)),
+    ("NET lots more\n", (None, None)),
+    ("NET -1 5\n", (None, 5)),
+    ("NET 1e30 5\n", (None, 5)),                    # past what a float carries exactly: not a count
+    ("NET 5 7 9\n", (5, 7)),
+    ("NET 5 7\nNET 50 70\n", (5, 7)),
+])
+def test_a_network_line_that_is_not_a_reading_costs_only_its_field(line, expect):
+    m = disp.parse_box_probe(PROBE + line)
+    assert (m["net_rx_bytes"], m["net_tx_bytes"]) == expect and m["disk_total_gb"]
+
+
+def _busy_ticks_here():
+    """This machine's busy ticks, whole and per core, read the way 31f defines them."""
+    whole, cores = None, {}
+    for ln in Path("/proc/stat").read_text().splitlines():
+        f = ln.split()
+        if f and f[0].startswith("cpu"):
+            n = [int(x) for x in f[1:9]] + [0] * 8
+            busy = n[0] + n[1] + n[2] + n[5] + n[6] + n[7]
+            if f[0] == "cpu":
+                whole = busy
+            else:
+                cores[str(int(f[0][3:]))] = busy
+    return whole, cores
+
+
+def _net_bytes_here():
+    """The bytes of this machine's one interface beside loopback; None when it has none or several."""
+    rx = tx = n = 0
+    for ln in Path("/proc/net/dev").read_text().splitlines()[2:]:
+        name, _, rest = ln.partition(":")
+        if name.strip() != "lo":
+            f = rest.split()
+            rx, tx, n = rx + int(f[0]), tx + int(f[8]), n + 1
+    return (rx, tx) if n == 1 else None
+
+
+@_A_BOXS_SHELL
+def test_the_probe_reads_this_machines_cpu_time_and_network_bytes():
+    """The real command on the real files. Counters only rise, so what the probe read lies between
+    a reading taken before it ran and one taken after. The network line is there exactly when this
+    machine has one interface beside loopback (a container has; a host that runs containers has not)."""
+    if not shutil.which("getconf"):
+        pytest.skip("no getconf here")
+    hz = os.sysconf("SC_CLK_TCK")
+    cpu_before, net_before = _busy_ticks_here(), _net_bytes_here()
+    done = subprocess.run(["sh", "-c", disp.BOX_PROBE_CMD], capture_output=True, text=True, timeout=60)
+    cpu_after, net_after = _busy_ticks_here(), _net_bytes_here()
+    assert done.returncode == 0, done.stderr
+    lines = done.stdout.splitlines()
+    assert f"CLKTCK {hz}" in lines
+    assert len([ln for ln in lines if ln.startswith("CPUS cpu ")]) == 1
+    m = disp.parse_box_probe(done.stdout)
+
+    def usec(ticks):
+        return ticks * 1_000_000 // hz
+
+    assert usec(cpu_before[0]) <= m["host_cpu_busy_usec"] <= usec(cpu_after[0])
+    assert set(m["host_cpu_core_busy_usec"]) == set(cpu_before[1]), "one line a core, by its number"
+    for core, got in m["host_cpu_core_busy_usec"].items():
+        assert usec(cpu_before[1][core]) <= got <= usec(cpu_after[1][core]), core
+    if net_before is None and net_after is None:
+        assert (m["net_rx_bytes"], m["net_tx_bytes"]) == (None, None), \
+            "not one interface beside loopback here: no line"
+    elif net_before is not None and net_after is not None:
+        assert net_before[0] <= m["net_rx_bytes"] <= net_after[0]
+        assert net_before[1] <= m["net_tx_bytes"] <= net_after[1]
+    # (an interface that came or went while the probe ran: neither is claimed)
+
+
+_PROC_STAT = """cpu  100 10 50 1000 30 5 7 3 2 1
+cpu0 60 4 20 500 10 2 3 1 2 1
+cpu1 40 6 30 500 20 3 4 2 0 0
+intr 12345 0 0
+ctxt 999
+btime 1700000000
+processes 4242
+procs_running 2
+softirq 100 1 2 3
+"""
+_PROC_NET_DEV = """Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 9999999   10000    0    0    0     0          0         0  9999999   10000    0    0    0     0       0          0
+  eth0:12345678901234   5000    0    0    0     0          0         0   222222    4000    0    0    0     0       0          0
+"""
+_A_SECOND_INTERFACE = (
+    "  eth1:    1000     10    0    0    0     0          0         0     2000      20    0    0    0     0       0          0\n")
+
+
+def _probe_on(tmp_path, stat=None, net=None):
+    """The probe string with its two /proc files swapped for recorded ones."""
+    cmd = disp.BOX_PROBE_CMD
+    assert cmd.count("/proc/stat ") == 1 and cmd.count("/proc/net/dev ") == 1
+    for name, real, body in (("stat", "/proc/stat ", stat), ("net_dev", "/proc/net/dev ", net)):
+        if body is not None:
+            (tmp_path / name).write_text(body)
+            cmd = cmd.replace(real, f"{tmp_path / name} ")
+    done = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.splitlines()
+
+
+@_A_BOXS_SHELL
+def test_the_two_programs_give_the_sums_worked_out_by_hand(tmp_path):
+    """Busy is user + nice + system + irq + softirq + steal: not idle, not iowait, and not the two
+    guest fields, which the kernel has already counted inside user and nice."""
+    lines = _probe_on(tmp_path, _PROC_STAT, _PROC_NET_DEV)
+    assert [ln for ln in lines if ln.startswith("CPUS")] == ["CPUS cpu 175", "CPUS cpu0 90", "CPUS cpu1 85"]
+    assert [ln for ln in lines if ln.startswith("NET")] == ["NET 12345678901234 222222"], \
+        "loopback left out, and a count that touches its colon reads"
+    m = disp.parse_box_probe("\n".join(lines).replace(
+        [ln for ln in lines if ln.startswith("CLKTCK")][0], "CLKTCK 100"))
+    assert _cpu_net(m) == (1750000, {"0": 900000, "1": 850000}, 12345678901234, 222222)
+
+
+@_A_BOXS_SHELL
+def test_a_shell_that_sees_two_interfaces_gives_no_network_line(tmp_path):
+    """A byte that crosses a card and a bridge is counted on both, and a sum over several falls
+    when one goes away: a counter must never. One interface is a reading; two are none."""
+    lines = _probe_on(tmp_path, _PROC_STAT, _PROC_NET_DEV + _A_SECOND_INTERFACE)
+    assert not [ln for ln in lines if ln.startswith("NET")]
+    assert [ln for ln in lines if ln.startswith("CPUS")], "and the CPU lines are still there"
+    m = disp.parse_box_probe("\n".join(lines))
+    assert (m["net_rx_bytes"], m["net_tx_bytes"]) == (None, None)
+
+
+@_A_BOXS_SHELL
+@pytest.mark.parametrize("stat,net", [("", ""), ("intr 5\n", _PROC_NET_DEV.split("  eth0")[0])])
+def test_a_machine_that_answers_neither_gives_neither_line(tmp_path, stat, net):
+    """Empty files, and a network table that holds only loopback: no line, and the probe goes on."""
+    lines = _probe_on(tmp_path, stat, net)
+    assert not [ln for ln in lines if ln.startswith(("CPUS", "NET"))]
+    m = disp.parse_box_probe("\n".join(lines))
+    assert m["cores"] >= 1 and _cpu_net(m) == (None, None, None, None)
+
+
+def test_the_row_holds_them_and_the_event_does_not(tmp_path):
+    """31c holds for 31f: the fields go to the row, and `box_measured` is the string it was."""
+    d, _ = _mk(tmp_path, _Run(PROBE_31F))
+    d._measure_box_resources()
+    row = _row(d)
+    assert tuple(row[key] for key in KEYS_31F) == (1234560000, {"0": 600000000, "1": 634560000}, 5000000, 7000000)
+    assert [detail for event, detail in _events(d) if event == "box_measured"] == [GOLDEN_BOX_MEASURED]
+
+
+def test_a_box_that_answers_without_them_has_them_null_in_its_row(tmp_path):
+    d, _ = _mk(tmp_path)
+    d._measure_box_resources()
+    row = _row(d)
+    assert all(key in row and row[key] is None for key in KEYS_31F)
+
+
+def test_the_faster_reading_carries_them_too(tmp_path):
+    d, run = _mk(tmp_path, _Run(PROBE_31F))
+    d._measure_box_resources()
+    _fast(d)
+    run.doc = PROBE_31F.replace("CPUS cpu 123456", "CPUS cpu 129456").replace("NET 5000000", "NET 5600000")
+    _set_row(d, {**_row(d), "at": _row(d)["at"] - 60})
+    d._last_reading[-1] -= 61
+    d._measure_box_resources()
+    row = _row(d)
+    assert len(run.calls) == 2 and (row["host_cpu_busy_usec"], row["net_rx_bytes"]) == (1294560000, 5600000)
+
+
+def test_the_exporter_serves_them_as_seconds_and_bytes(tmp_path):
+    exporter = _load("metrics_exporter", "fleet/metrics_exporter.py")
+    d, _ = _mk(tmp_path, _Run(PROBE_31F))
+    d._measure_box_resources()
+    lines = exporter.Exporter(str(tmp_path / "runs.sqlite")).collect().splitlines()
+    box = 'label="laptop-gpu",instance_id="-1"'
+    for line in (f"fleet_box_cpu_busy_seconds_total{{{box}}} 1234.56",
+                 f'fleet_box_cpu_core_busy_seconds_total{{{box},core="0"}} 600',
+                 f'fleet_box_cpu_core_busy_seconds_total{{{box},core="1"}} 634.56',
+                 f"fleet_box_network_receive_bytes_total{{{box}}} 5000000",
+                 f"fleet_box_network_transmit_bytes_total{{{box}}} 7000000",
+                 "# TYPE fleet_box_cpu_core_busy_seconds_total counter",
+                 "# TYPE fleet_box_network_transmit_bytes_total counter"):
+        assert line in lines, line
