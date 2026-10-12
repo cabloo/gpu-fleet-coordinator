@@ -22,6 +22,7 @@ incident that produced them, which is the fastest way to learn why a rule exists
 | [fleet-utilization-monitor](fleet-utilization-monitor.spec.md) | finding under-used capacity and proposing the fix |
 | [experiments-retention](experiments-retention.spec.md) | bounding the data root |
 | [free-space-guard](free-space-guard.spec.md) | what the dispatcher does when the data root runs low anyway: hold, alert, fail nothing |
+| [metrics-exporter](metrics-exporter.spec.md) | the registry's state as Prometheus text: queue, poll cycle, data root, each box's newest reading |
 
 `undeliverable-blob-is-misclassified-as-a-code-bug.md` is a diagnosis note, kept because the code
 refers to it.

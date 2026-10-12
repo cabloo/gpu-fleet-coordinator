@@ -248,6 +248,8 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
     are measured (invariant 22), else slot-count governs.
   - `resource_measure_every_min = 5` (invariant 22) — how often to sample each live box's real GPU
     memory so packing/consolidation run on measured VRAM, not the static `vram_per_lane_gb` hint.
+  - `box_reading_every_min = 0` (invariant 31d) — how often each OWNED box gets a reading-only
+    probe between the full ones, so a status system sees current numbers. 0 = off. Read live.
   **Settings migrations.** Defaults are written only for *missing* keys at first start, so lowering
   a default never touches an already-seeded registry on its own. A small allowlist of *guarded*
   migrations (`dispatcher._SETTING_MIGRATIONS`, each `(key, superseded_default, new_default)`) runs
@@ -3191,6 +3193,70 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
        probe (~5 min) retries it; an alert must not be lost to one transient network error. Every
        attempt logs a `notify` event (`kind`, `ok`, `error`).
 
+31. **EACH BOX'S NEWEST READING IS KEPT IN ONE ROW, AND THE PROBE READS HEAT, POWER, PRESSURE AND
+    DISK (2026-10-11).** A status system wants each box's current numbers about once a minute. The
+    only record of a probe was the `box_measured` event: one append-only row per box per
+    `resource_measure_every_min`, found again by reading the event log. Probing every minute
+    through that path would write five times the rows for ever (measured on a live registry: about
+    1,060 `box_measured` rows a day at 488 bytes each), and would re-tune everything that counts
+    samples: the GPU-loss alert's `GPU_LOST_MIN_SAMPLES` of invariant 30, the per-lane learning
+    of 26, the seed bound of 28b.
+    a. *The reading row.* After every successful measure probe (22) and every reading-only probe
+       (d) the dispatcher writes `settings` row `box_reading_i<ID>`: the `box_measured` payload
+       (25) without `ep` and `grp`, plus `at` (epoch seconds, read when the box answered) and the
+       fields of (b). One row per box, overwritten in place, so the registry does not grow. The
+       row's `cpu_used_cores` is the rate against the row it replaces; a row older than 15 minutes
+       (or than three `resource_measure_every_min` periods, where that is longer) is no
+       predecessor, and the rate is then null. `metrics_exporter.py` reads these rows and
+       nothing else for a box's numbers. The on-demand probe (`runq box probe`, 20k) writes no
+       row: it answers one question about one box.
+    b. *Three more lines in the probe,* each keyed, each optional, each null when the box does not
+       answer it:
+       - `GPUX`: temperature (`gpu_temp_c`), draw and power limit (`gpu_power_w`,
+         `gpu_power_limit_w`), and the driver's reasons for running below its clocks as a bit mask
+         (`gpu_throttle`), from the first card that answers any of the four (a card that answers
+         `[N/A]` to all of them is passed over). The query asks for the mask by the name current
+         drivers use, then by the name older drivers used, then not at all: a driver refuses a
+         whole query over one field it does not know, and that must cost only the mask. The next
+         form is tried ONLY when the driver's answer was that refusal. Any other failure (no tool,
+         a blocked driver, a card off the bus) ends the line there, and each call runs under
+         `timeout -k 2 5` (asked to stop at 5 s, killed 2 s later if it has not): a failing
+         driver asked three more times could take the whole probe past its limit, and then no
+         `box_measured` is logged and the GPU-loss alert (30) cannot fire. A box with no such
+         `timeout` answers no `GPUX` line. A call the kernel cannot interrupt is bounded by
+         nothing here, as the `GPU` line's own call never was; the probe's own limit ends it. It
+         is its own `nvidia-smi` call and its own line. The `GPU` line admits work (the VRAM gate)
+         and arms the GPU-loss alert, so nothing is added to that one.
+       - `PSI`: the kernel's pressure totals for `cpu`, `memory` and `io`, in microseconds
+         (`psi.cpu_some`, `psi.mem_some`, `psi.mem_full`, `psi.io_some`, `psi.io_full`). These are
+         the HOST's on purpose: time that tasks spent waiting for a resource is how a box shared
+         with other work shows it, and no other reading here does.
+       - `DISK`: the size and the free space of the filesystem the spool is on (`disk_total_gb`,
+         `disk_free_gb`).
+    c. *`box_measured` does not change:* same cadence, same text, same payload, byte for byte. The
+       new fields go to the reading row. `_box_res` carries them and nothing reads them there.
+       The one other place they show is the on-demand probe's `box_probe` event, whose `measured`
+       is whatever the probe parsed and so now holds them too.
+    d. *A faster reading, off by default.* `box_reading_every_min` (read live; 0 = off; anything
+       that is not a positive finite number is off) gives each OWNED box a reading-only probe when
+       its last probe of either kind is that old. It sends `BOX_PROBE_CMD` alone, to the address
+       in the box's own row, with a 10 s limit on the whole call, and does nothing but write the
+       row: it leaves `_box_res` alone (admission keeps its `resource_measure_every_min` samples
+       and the rates between them), logs no event of its own, does not feed the connection
+       tracker, does not assert the freeze marker or the launch pacing, and does not run the
+       GPU-loss check. One read it shares with placement: the row holds the box's open slots
+       (`slots_eff`), and reading those logs here what it logs for placement every poll, a
+       schedule that does not parse (`capacity_error`) and a learned cap's one repair. A full
+       probe reads them once, for its event and its row. A box
+       whose last call of any kind failed is skipped; the full probe finds it when it is back. A
+       reading that does not come (a failed call, the limit, an answer that does not parse) costs
+       that reading, and the box is not asked for another until its next full probe: a box that
+       cannot answer must not cost the `measure` phase 10 s every minute. Rented boxes are left
+       out: a call to one goes through a proxy, and they keep the reading every full probe writes.
+       What it costs is on the record: the calls run inside the `measure` phase that 23 times.
+    e. *A box that leaves takes its row with it.* On every pass, a row whose box is no longer
+       `live` or `paused` is deleted.
+
 ## Fixtures
 
 Golden decision traces (driven through the pure functions / `--once --dry-run`); shared settings
@@ -3423,6 +3489,17 @@ them — their offers are ranked purely by cores-per-$. The gates themselves are
   `FAILED_validation`, nothing executed.
 - Idempotent restart: replaying any fixture sequence twice against the same DB produces no
   duplicate events and no repeated `vastai`/rsync intents (mirror of supervisor invariant 8).
+- **Box readings (invariant 31)** — `tests/test_box_reading.py`: the three new probe lines parse,
+  and a probe without them parses exactly as before; driver prose, `[N/A]` and a mask that is not
+  one cost only their own field; a full probe writes the row and the `box_measured` event it logs
+  is the one it logged before this invariant; the row holds no `ep` and no `grp`; the row's CPU
+  rate is against the row it replaces, and null across a gap longer than 31a's limit; the probe
+  string is run in a real shell against a driver that refuses a field, one that fails, one that
+  hangs and one that hangs and ignores the stop signal; with
+  `box_reading_every_min` at 0 nothing is sent between full probes; at 1 an owned box gets
+  `BOX_PROBE_CMD` alone, no event, no `_box_res` change, no tracker count, and a rented box gets
+  nothing; a failing box is skipped; a failed or unparseable reading leaves the old row; an ssh
+  that raises does not raise out of the pass; a destroyed box's row is deleted.
 - **Paid end-to-end smoke — RUN 2026-07-08, real Vast box, total spend $0.39** (GTX 1660,
   $0.041/hr, instance 40000004): `runq add` a low-priority task, ran it to mid-flight, rented
   correctly (bootstrap ssh probe + payload ship + `spool_worker.py` start all for real), then

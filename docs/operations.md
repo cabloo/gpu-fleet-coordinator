@@ -141,6 +141,32 @@ python fleet/est_defaults.py --dry-run               # run-time estimates learne
 python fleet/prune_experiments.py                    # what retention would delete (add --apply)
 ```
 
+## Metrics for a status system
+
+If you run Prometheus, the exporter serves the registry's current state for it to scrape: tasks by
+state, the age of the oldest queued task, how long the newest poll cycle took and where, free
+space on the data root, events as they are appended, and each box's newest reading.
+
+```
+python fleet/metrics_exporter.py --db <data root>/runs.sqlite --host 0.0.0.0 --port 9108
+python fleet/metrics_exporter.py --db <data root>/runs.sqlite --once       # print one scrape
+```
+
+It opens the registry read-only, holds no credentials and reaches no box. Give it a read-only view
+of the data root. The route has no authentication: `--host` decides who can read it (the default
+is loopback; `0.0.0.0` above suits a container on a network of its own). Nothing in the dispatcher
+reads a number back; a site without Prometheus loses nothing by not running it.
+
+An answering exporter does not mean a running dispatcher. After a dispatcher is killed the
+registry can still be read, and the exporter goes on serving the last numbers written. Alert on
+the age of the newest poll cycle instead: `time() - fleet_poll_cycle_timestamp_seconds`.
+
+A box's reading is written at every probe (every `resource_measure_every_min`, 5 by default).
+For a fresher one on the boxes you own, set `box_reading_every_min` (say 1): between full probes
+the dispatcher then sends each owned box the probe alone and writes its reading, and does nothing
+else with the answer. What that costs shows in the `measure` phase of
+`fleet_poll_phase_seconds`. The metric names are in `docs/specs/metrics-exporter.spec.md`.
+
 ## Add a machine you own
 
 A box is a Linux machine the coordinator reaches as root over ssh, normally a Docker container of
@@ -224,8 +250,8 @@ When a setting takes effect depends on who reads it:
 
 - the dispatcher reads most settings once, at start: restart it after a change;
 - `bundle_compile` and its companions are read by `runq` each time it queues;
-- `launch_gate`, the worker-roll limits, the two data-root marks and per-box rows are read on
-  every pass.
+- `launch_gate`, `box_reading_every_min`, the worker-roll limits, the two data-root marks and
+  per-box rows are read on every pass.
 
 **Eight settings are reset at start if they hold a default that was later replaced**, because the
 dispatcher cannot tell an old default from your choice of the same value. Writing the left-hand

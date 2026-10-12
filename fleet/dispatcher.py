@@ -594,6 +594,9 @@ DEFAULT_SETTINGS = {
     # consolidation run on measured VRAM instead of the static `vram_per_lane_gb` hint. Best-effort,
     # in-memory (a restart just re-measures within a cadence).
     "resource_measure_every_min": 5,
+    # Invariant 31d: how often each OWNED box gets a reading-only probe between the full ones, so a
+    # status system sees current numbers. 0 = off. Read live, so turning it on needs no restart.
+    "box_reading_every_min": 0,
     # box-pause inv. 20b: re-push an owned box's capacity schedule to its host enforcer at least this
     # often even when unchanged, so a recreated worker container is healed without a restart.
     "capacity_push_every_min": 30,
@@ -755,6 +758,28 @@ BOX_PROBE_CMD = (
     # prose at stdout, simply produces no parseable GPU line and that axis reads unmeasured.
     "nvidia-smi --query-gpu=memory.total,memory.used,utilization.gpu,utilization.memory,name "
     "--format=csv,noheader,nounits 2>/dev/null | awk '{print \"GPU\", $0}'; "
+    # Invariant 31b. Heat, draw, power limit and the driver's reasons for running below its clocks.
+    # A SEPARATE call and line: the `GPU` line above admits work and arms the GPU-loss alert, and a
+    # driver refuses a whole query over one field it does not know. So the mask is asked for by its
+    # current name, then by its older one, then not at all — but ONLY when the driver's answer was
+    # that refusal ("... is not a valid field to query"). Any other failure (no tool, a blocked
+    # driver, a card off the bus) ends here with no line: asking a failing driver three more times
+    # could take the whole probe past its limit, and the probe is what admission reads. `timeout`
+    # bounds a driver that hangs, and `-k` one that ignores being asked to stop (killed 2 s later);
+    # where there is no such `timeout` the line is simply absent. A call the kernel cannot
+    # interrupt is bounded by nothing here, as the `GPU` line's own call never was.
+    "x=$(timeout -k 2 5 nvidia-smi --query-gpu=temperature.gpu,power.draw,power.limit,clocks_event_reasons.active "
+    "--format=csv,noheader,nounits 2>&1) || case \"$x\" in *\"valid field\"*) "
+    "x=$(timeout -k 2 5 nvidia-smi --query-gpu=temperature.gpu,power.draw,power.limit,clocks_throttle_reasons.active "
+    "--format=csv,noheader,nounits 2>&1) || case \"$x\" in *\"valid field\"*) "
+    "x=$(timeout -k 2 5 nvidia-smi --query-gpu=temperature.gpu,power.draw,power.limit "
+    "--format=csv,noheader,nounits 2>&1) || x= ;; *) x= ;; esac ;; *) x= ;; esac; "
+    "[ -n \"$x\" ] && echo \"$x\" | awk '{print \"GPUX\", $0}'; "
+    # The HOST's pressure totals, microseconds: time tasks spent waiting for the resource.
+    "for r in cpu memory io; do [ -r /proc/pressure/$r ] && "
+    "awk -v r=$r '{split($5,a,\"=\");print \"PSI\",r,$1,a[2]}' /proc/pressure/$r 2>/dev/null; done; "
+    # The filesystem the spool is on (the home directory's, before there is a spool): size, free, KB.
+    "df -Pk ~/spool ~ 2>/dev/null | awk 'NR==2{print \"DISK\", $2, $4}'; "
     # CPU quota in cores ('-' when unlimited/unreadable -> the host core count stands in)
     "if [ -r /sys/fs/cgroup/cpu.max ]; then "
     "awk '{if($1==\"max\")print \"CPUQ -\";else printf \"CPUQ %.4f\\n\",$1/$2}' "
@@ -863,6 +888,32 @@ def _probe_num(tok: str) -> float | None:
     return v
 
 
+def _probe_reading(tok: str) -> float | None:
+    """One optional invariant-31 field: a finite number that is not negative, else None. `[N/A]`,
+    `nan` and driver prose are all "not measured"."""
+    v = _probe_num(tok)
+    return v if v is not None and 0.0 <= v < float("inf") else None
+
+
+_PROBE_MASK_RE = re.compile(r"0[xX][0-9a-fA-F]{1,16}\Z")
+_PSI_KEYS = {"cpu": "cpu", "memory": "mem", "io": "io"}
+
+
+def _probe_mask(tok: str) -> int | None:
+    """The driver's clock-reason bit mask (`0x0000000000000004`), or None when it printed anything
+    else: `[N/A]` and `[Not Supported]` are what a card that does not report it answers."""
+    return int(tok, 16) if _PROBE_MASK_RE.match(tok or "") else None
+
+
+# Invariant 31: the `settings` rows that hold each box's newest reading. A status system reads them.
+BOX_READING_PREFIX = "box_reading_i"
+# 31a: a row older than this is no predecessor for a CPU rate — the box was away in between. The
+# limit is three full-probe periods where that is longer (`_reading_rate_max_gap_s`).
+BOX_READING_RATE_MAX_GAP_S = 900.0
+# 31d: a reading-only probe gives up well inside a poll cycle; nothing waits on its answer.
+BOX_READING_PROBE_TIMEOUT_S = 10
+
+
 def parse_box_probe(text: str) -> dict | None:
     """Parse `BOX_PROBE_CMD` output into measured box resources (invariants 22/23/25). Pure. Returns
     None if the CPU/RAM lines are unusable — a box we cannot measure carries NO measurement and the
@@ -882,13 +933,19 @@ def parse_box_probe(text: str) -> dict | None:
     that field. The HOST-basis keys keep their exact pre-25 meaning and units."""
     keyed: dict = {}
     gpu_lines: list = []
+    gpux_lines: list = []
+    psi_lines: list = []
     for ln in (text or "").splitlines():
         parts = ln.strip().split()
         if not parts:
             continue
         if parts[0] == "GPU":
             gpu_lines.append(" ".join(parts[1:]))
-        elif parts[0] in ("NPROC", "LOAD", "MEM", "CPUQ", "CPUU", "MEMCG", "MEMANON"):
+        elif parts[0] == "GPUX":
+            gpux_lines.append(" ".join(parts[1:]))
+        elif parts[0] == "PSI":
+            psi_lines.append(parts[1:])
+        elif parts[0] in ("NPROC", "LOAD", "MEM", "CPUQ", "CPUU", "MEMCG", "MEMANON", "DISK"):
             keyed.setdefault(parts[0], parts[1:])
     try:
         cores = int(float(keyed["NPROC"][0]))
@@ -902,7 +959,10 @@ def parse_box_probe(text: str) -> dict | None:
            # invariant 25 — container-true axes, all optional
            "gpu_mem_util": None, "gpu_name": None, "gpu_count": None,
            "cpu_quota_cores": None, "cpu_usage_usec": None,
-           "mem_limit_gb": None, "mem_used_gb": None, "mem_anon_gb": None}
+           "mem_limit_gb": None, "mem_used_gb": None, "mem_anon_gb": None,
+           # invariant 31b — read for the box's reading row; nothing admits on them
+           "gpu_temp_c": None, "gpu_power_w": None, "gpu_power_limit_w": None, "gpu_throttle": None,
+           "psi": None, "disk_total_gb": None, "disk_free_gb": None}
     # First PARSEABLE GPU row wins, and the frozen fields stay first-GPU (never a sum) so a
     # multi-GPU box's VRAM gate keeps admitting exactly as it did; `gpu_count` reports the rest.
     parsed_gpus = 0
@@ -941,6 +1001,30 @@ def parse_box_probe(text: str) -> dict | None:
         anon = _probe_num(keyed["MEMANON"][0]) if keyed["MEMANON"] else None
         if anon is not None:
             out["mem_anon_gb"] = anon / (1024.0 ** 3)
+    # Invariant 31b. First row with ANY reading wins, like the `GPU` line (first card, never a sum).
+    for row in gpux_lines:
+        parts = [p.strip() for p in row.split(",")]
+        temp, draw, limit = ([_probe_reading(p) for p in parts[:3]] + [None] * 3)[:3]
+        mask = _probe_mask(parts[3]) if len(parts) >= 4 else None
+        if temp is None and draw is None and limit is None and mask is None:
+            continue  # driver prose
+        out.update(gpu_temp_c=temp, gpu_power_w=draw, gpu_power_limit_w=limit, gpu_throttle=mask)
+        break
+    psi = {}
+    for toks in psi_lines:
+        if len(toks) == 3 and toks[0] in _PSI_KEYS and toks[1] in ("some", "full"):
+            total = _probe_reading(toks[2])
+            if total is not None:
+                psi.setdefault(f"{_PSI_KEYS[toks[0]]}_{toks[1]}", int(total))
+    psi.pop("cpu_full", None)  # the kernel reports no such thing for a whole machine; it reads 0
+    out["psi"] = psi or None
+    if "DISK" in keyed:
+        toks = keyed["DISK"]
+        total = _probe_reading(toks[0]) if toks else None
+        free = _probe_reading(toks[1]) if len(toks) > 1 else None
+        if total:
+            out["disk_total_gb"] = total / (1024.0 ** 2)
+            out["disk_free_gb"] = None if free is None else free / (1024.0 ** 2)
     return out
 
 
@@ -3212,6 +3296,9 @@ class Dispatcher:
         # counter (invariant 20h) — no teardown/rent decision depends on it (invariant 1).
         self._box_res: dict[int, dict] = {}
         self._last_res_measure: dict[int, float] = {}
+        # Invariant 31d: when each box was last probed for its reading row, by either kind of probe.
+        # In-memory by design: a restart sends one reading probe early, which costs nothing.
+        self._last_reading: dict[int, float] = {}
         # box-pause inv. 20b: (payload, pushed_at) last delivered to each owned box's host enforcer.
         # In-memory by design — a restart simply re-pushes once.
         self._cap_pushed: dict[int, tuple] = {}
@@ -4745,11 +4832,16 @@ class Dispatcher:
         total is the robust signal, which a whole-box drain (21a) is all that's needed anyway."""
         every = self.settings.get("resource_measure_every_min", 5) * 60
         now = time.time()
-        for inst in [dict(r) for r in self.conn.execute(
-                "SELECT * FROM instances WHERE state IN ('live','paused')")]:
+        boxes = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM instances WHERE state IN ('live','paused')")]
+        self._drop_stale_box_readings({inst["id"] for inst in boxes})
+        reading_every = self._box_reading_every_s()
+        for inst in boxes:
             if now - self._last_res_measure.get(inst["id"], 0.0) < every:
+                self._probe_box_reading(inst, reading_every)   # invariant 31d; never raises
                 continue
             self._last_res_measure[inst["id"]] = now
+            self._last_reading[inst["id"]] = now
             host, port = endpoint_for(inst, self.tracker, self.vastai_run)
             # box-pause 14a: the same call re-asserts the box's FREEZE marker to what the registry
             # says it should be, and reports what it found. Inv. 8b: it also delivers the launch
@@ -4757,6 +4849,7 @@ class Dispatcher:
             frozen = self._should_be_frozen(inst)
             gate = launch_gate_payload(self._live_setting("launch_gate"))
             proc = ssh_run(host, port, box_assert_cmd(frozen, gate) + BOX_PROBE_CMD, run=self.run)
+            answered_at = time.time()
             ok = getattr(proc, "returncode", 1) == 0
             self.tracker.record(inst["id"], ok)
             if not ok:
@@ -4789,12 +4882,129 @@ class Dispatcher:
             # hardware reading and its timestamp can never disagree — and it carries `slots`/`running`
             # because a sample without them cannot distinguish "idle, nothing queued" from
             # "under-packed while work waited", which is the whole question this panel answers.
+            payload = self._box_perf_payload(inst, m)
             self.log("box_measured",
                       f"{cpu}, ram {m['ram_avail_gb']:.1f}GB free, {gpu}"
-                      f" | {json.dumps(self._box_perf_payload(inst, m), separators=(',', ':'))}",
+                      f" | {json.dumps(payload, separators=(',', ':'))}",
                       instance_id=inst["id"])
             self.conn.commit()
+            self._write_box_reading(inst, m, answered_at, payload)   # invariant 31a; never raises
             self._check_gpu_alert(inst)
+
+    # -- invariant 31: each box's newest reading, where a status system can read it --
+    def _box_reading_every_s(self) -> float:
+        """31d's cadence in seconds, 0.0 when off. The settings table is hand-editable, so anything
+        that is not a positive number is "off" rather than an error in the measure pass."""
+        v = self._live_setting("box_reading_every_min")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return 0.0
+        try:
+            seconds = float(v) * 60.0     # an integer too large for a float raises here
+        except OverflowError:
+            return 0.0
+        return seconds if 0.0 < seconds < float("inf") else 0.0
+
+    def _drop_stale_box_readings(self, present: set) -> None:
+        """31e: a box that is no longer `live` or `paused` takes its reading row with it."""
+        try:
+            stale = [r["key"] for r in self.conn.execute(
+                "SELECT key FROM settings WHERE key >= ? AND key < ?",
+                (BOX_READING_PREFIX, BOX_READING_PREFIX[:-1] + chr(ord(BOX_READING_PREFIX[-1]) + 1)))
+                if r["key"] not in {f"{BOX_READING_PREFIX}{iid}" for iid in present}]
+            for key in stale:
+                self.conn.execute("DELETE FROM settings WHERE key=?", (key,))
+            if stale:
+                self.conn.commit()
+        except sqlite3.Error:
+            pass  # a status row must never break the poll; the next pass tries again
+
+    def _reading_rate_max_gap_s(self) -> float:
+        """31a: how old a row may be and still be the predecessor of a CPU rate: three full-probe
+        periods, and never under 15 minutes. With a fixed 15 minutes a site whose full probe is
+        that slow, and whose faster reading is off, would never have a rate in its rows."""
+        try:
+            every = float(self.settings.get("resource_measure_every_min", 5)) * 60.0
+        except (TypeError, ValueError, OverflowError):
+            return BOX_READING_RATE_MAX_GAP_S
+        if not 0.0 < every < float("inf"):
+            return BOX_READING_RATE_MAX_GAP_S
+        return max(BOX_READING_RATE_MAX_GAP_S, 3.0 * every)
+
+    def _write_box_reading(self, inst: dict, m: dict, at: float, payload: dict | None = None) -> None:
+        """31a: overwrite the box's reading row with this probe's numbers. Never raises.
+
+        The row is the `box_measured` payload plus what only a status system wants. `ep` and `grp`
+        are left out: the row is numbers about a box, and those two name somebody's work. A full
+        probe hands over the payload it has just logged, so the box's slots and tasks are read
+        once for both; its rate is replaced below by the row's own."""
+        def r(v, dp):
+            return None if v is None else round(float(v), dp)
+        try:
+            key = f"{BOX_READING_PREFIX}{inst['id']}"
+            reading = (dict(payload) if payload is not None
+                       else self._box_perf_payload(inst, {**m, "cpu_used_cores": None}))
+            reading.pop("ep", None)
+            reading.pop("grp", None)
+            # The rate is against the row this one replaces, not against `_box_res`: with 31d on,
+            # readings come faster than the samples admission keeps, and each rate must span its own.
+            prev = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            try:
+                prev = json.loads(prev["value"]) if prev is not None else {}
+                gap = at - float(prev["at"])
+                rate = (_cpu_used_cores(prev, {**m, "at": at})
+                        if 0.0 <= gap <= self._reading_rate_max_gap_s() else None)
+            except (ValueError, TypeError, KeyError, OverflowError):
+                rate = None  # no row yet, or one somebody edited by hand
+            psi = m.get("psi")
+            reading.update(
+                at=round(at, 1), cpu_used_cores=r(rate, 2),
+                gpu_temp_c=r(m.get("gpu_temp_c"), 0), gpu_power_w=r(m.get("gpu_power_w"), 1),
+                gpu_power_limit_w=r(m.get("gpu_power_limit_w"), 1), gpu_throttle=m.get("gpu_throttle"),
+                psi=dict(psi) if isinstance(psi, dict) else None,
+                disk_total_gb=r(m.get("disk_total_gb"), 1), disk_free_gb=r(m.get("disk_free_gb"), 1))
+            self.conn.execute(
+                "INSERT INTO settings(key, value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, json.dumps(reading, separators=(",", ":"))))
+            self.conn.commit()
+        except Exception:   # noqa: BLE001 — a status row must never break the poll
+            pass
+
+    def _probe_box_reading(self, inst: dict, every_s: float) -> None:
+        """31d: one reading-only probe of an owned box, when its last probe of either kind is old
+        enough. It writes the reading row and does NOTHING else — no event of its own, no
+        `_box_res`, no connection-tracker count, no freeze or launch-pacing assert, no GPU-loss
+        check — so turning it on changes what a status system sees and nothing the dispatcher
+        decides. (The row holds the box's open slots, read as placement reads them every poll; that
+        read logs what it logs there: a schedule that does not parse, a learned cap's one repair.)
+        Never raises."""
+        iid = inst["id"]
+        if not every_s or inst.get("source") != "owned":
+            return
+        if time.time() - self._last_reading.get(iid, 0.0) < every_s:
+            return
+        self._last_reading[iid] = time.time()   # stamped BEFORE the call: a hanging box is not retried every poll
+        if self.tracker.consecutive_fails(iid):
+            return   # its other calls are failing; the full probe finds it when it is back
+        # An owned box's address is its row's. `endpoint_for` is not asked: for a box that has ever
+        # failed three calls in a row it looks the address up first, a call with a limit of its own.
+        host, port = inst.get("ssh_host"), inst.get("ssh_port")
+        m = None
+        try:
+            if host and port:
+                proc = _run_or_timeout(self.run, ssh_cmd(host, port) + [BOX_PROBE_CMD],
+                                       BOX_READING_PROBE_TIMEOUT_S)
+                at = time.time()
+                if getattr(proc, "returncode", 1) == 0:
+                    m = parse_box_probe(getattr(proc, "stdout", "") or "")
+        except Exception:   # noqa: BLE001 — a status reading must never break the poll
+            m = None
+        if m is None:
+            # A reading that did not come costs up to its limit in the measure phase, so this box is
+            # not asked again until its next full probe (which stamps this anew).
+            self._last_reading[iid] = float("inf")
+            return
+        self._write_box_reading(inst, m, at)
 
     # -- invariant 30: GPU-loss push alert --
     def _check_gpu_alert(self, inst: dict) -> None:

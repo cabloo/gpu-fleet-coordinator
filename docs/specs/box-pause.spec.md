@@ -264,7 +264,8 @@ Same machinery as pause/drain, generalized from "0 or full" to a scheduled cap.
        CPU-bound one (inv. 22), and a hand-set `cores_per_lane` calibrated from the heaviest job
        class throttled the desktop to 2 slots at ~20% CPU / 10% GPU with work queued (07-27→28).
        Declared numbers cannot track a change of job class; measurement can.
-    b. *Probe* (`BOX_PROBE_CMD`, one ssh per box per `resource_measure_every_min`, extending inv.
+    b. *Probe* (`BOX_PROBE_CMD`, one ssh per box per `resource_measure_every_min`, plus the
+       reading-only probe of task-dispatcher inv. 31d where that is turned on, extending inv.
        22's nvidia-smi call): `nproc`, `/proc/loadavg`, `free -m`, and `nvidia-smi`. `parse_box_probe`
        is pure and returns `{cores, load1, ram_total_gb, ram_avail_gb, vram_total_gb, vram_used_gb,
        gpu_util}`. **GPU is independent of CPU/RAM**: a `NOGPU`/blocked/unparseable GPU line still
