@@ -785,16 +785,19 @@ BOX_PROBE_CMD = (
     # line. Not idle or iowait, and not the two guest fields: the kernel has already counted those
     # inside user and nice. A container reads the HOST's lines there, which is the point: how busy
     # the whole machine is, whoever keeps it busy. `%.0f`, never `%d`: mawk, the awk Debian and
-    # Ubuntu ship, stops `%d` at 2^31.
+    # Ubuntu ship, stops `%d` at 2^31 - 1.
     "echo CLKTCK $(getconf CLK_TCK 2>/dev/null); "
     "awk '/^cpu/{b=$2+$3+$4+$7+$8+$9;printf \"CPUS %s %.0f\\n\",$1,b}' /proc/stat 2>/dev/null; "
-    # Bytes in and out on the ONE interface this shell sees beside loopback, which is what a worker
-    # in its own network namespace has. A shell that sees several gives no line: a byte is counted
-    # on every interface it crosses (a card, a bridge, a container's end), and their sum FALLS
-    # when one of them goes away, which a consumer reads as a counter that started again. The
-    # colon after the name is replaced first: the kernel prints no space after it once the count
-    # is long.
-    "awk 'NR>2{sub(/:/,\" \");if($1!=\"lo\"){n++;rx+=$2;tx+=$10}}"
+    # Bytes in and out on the ONE interface this shell sees in use beside loopback, which is what a
+    # worker in its own network namespace has. An interface that has carried no byte either way
+    # is not counted: a kernel with tunnel drivers built in or loaded gives every namespace
+    # devices that never carry one (`tunl0`, `sit0`), and they would leave such a worker with no
+    # reading at all. A shell that sees several in use gives no line: a byte is counted on every
+    # interface it crosses (a card, a bridge, a container's end), and their sum FALLS when one
+    # of them goes away, which a consumer reads as a counter that started again. The colon after
+    # the name is replaced first: an older kernel prints no space after it once the count is
+    # long.
+    "awk 'NR>2{sub(/:/,\" \");if($1!=\"lo\"&&$2+$10>0){n++;rx+=$2;tx+=$10}}"
     "END{if(n==1)printf \"NET %.0f %.0f\\n\",rx,tx}' /proc/net/dev 2>/dev/null; "
     # CPU quota in cores ('-' when unlimited/unreadable -> the host core count stands in)
     "if [ -r /sys/fs/cgroup/cpu.max ]; then "

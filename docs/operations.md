@@ -171,22 +171,27 @@ Most of a box's reading is the whole machine's, because a container reads the ho
 CPU time (`fleet_box_cpu_busy_seconds_total`, and the same for each core), load, pressure and
 memory available. The network bytes are not: where the worker has its own network namespace,
 which is how the setup script starts it, they are the worker's own traffic. For a machine's whole
-traffic, run a reader on the host. A box whose probe sees more than one interface beside loopback
-(one registered bare, or a worker on the host's network) has no network reading: a sum over
-several interfaces counts a byte more than once. A box that is itself a virtual machine reads the
-virtual machine's CPUs. Each core's time is served for the boxes you own, not for rented ones.
+traffic, run a reader on the host. A box whose probe sees more than one interface in use beside
+loopback (one registered bare, or a worker on the host's network) has no network reading: a sum
+over several interfaces counts a byte more than once. An interface that has never carried a byte
+is not counted, so such a box with one card in use and an idle bridge does have a reading, and
+there it is that card's traffic. A box that is itself a virtual machine reads the virtual
+machine's CPUs. Each core's time is served for the boxes you own, not for rented ones.
 
 These counters move once a reading, not once a scrape. For a figure per second, divide a counter's
 change between two instants by the change of `fleet_box_measured_timestamp_seconds` between the
 same two:
 
     ((fleet_box_cpu_busy_seconds_total - fleet_box_cpu_busy_seconds_total offset 5m) >= 0)
-      / on(label, instance_id)
+      / on(label, instance_id) group_left()
     ((fleet_box_measured_timestamp_seconds - fleet_box_measured_timestamp_seconds offset 5m) > 0)
 
-That is exact, and it has no value where the counter started again or no reading came. A plain
-`rate()` divides by the scraper's clock: over a window that holds one reading it reads anywhere
-from nothing to a third too much.
+That is exact, and it has no value where the counter started again or no reading came. The
+`group_left()` is for a counter with one label more than the reading's time (the per-core one,
+and the two pressure counters); the same lines then serve every counter of a reading. A plain
+`rate()` divides by the scraper's clock: with a reading a minute and a scrape every 15 seconds,
+over a window of one minute it reads anywhere from nothing to a third too much, further off the
+slower the scrape, and several times too much for a box read every 5 minutes.
 
 ## Add a machine you own
 

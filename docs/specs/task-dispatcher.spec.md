@@ -3217,7 +3217,8 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
     a. *The reading row.* After every successful measure probe (22) and every reading-only probe
        (d) the dispatcher writes `settings` row `box_reading_i<ID>`: the `box_measured` payload
        (25) without `ep` and `grp`, plus `at` (epoch seconds, read when the box answered) and the
-       fields of (b). One row per box, overwritten in place, so the registry does not grow. The
+       fields of (b) and (f). One row per box, overwritten in place, so the registry does not
+       grow. The
        row's `cpu_used_cores` is the rate against the row it replaces; a row older than 15 minutes
        (or than three `resource_measure_every_min` periods, where that is longer) is no
        predecessor, and the rate is then null. `metrics_exporter.py` reads these rows and
@@ -3249,7 +3250,7 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
     c. *`box_measured` does not change:* same cadence, same text, same payload, byte for byte. The
        new fields go to the reading row. `_box_res` carries them and nothing reads them there.
        The one other place they show is the on-demand probe's `box_probe` event, whose `measured`
-       is whatever the probe parsed and so now holds them too.
+       is what the probe parsed, less the per-core table of (f), and so holds them too.
     d. *A faster reading, off by default.* `box_reading_every_min` (read live; 0 = off; anything
        that is not a positive finite number is off) gives each OWNED box a reading-only probe when
        its last probe of either kind is that old. It sends `BOX_PROBE_CMD` alone, to the address
@@ -3273,7 +3274,7 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
        box wants five things side by side: GPU, CPU, memory, disk and network. The reading had no
        figure for how busy the whole machine is (`load1` counts waiting tasks, `cpu_used_cores` is
        the worker's own share), nothing per core, and nothing about the network. Three more keyed
-       lines, optional and null like those of (b), and kept in the reading row only (c):
+       lines, optional and null like those of (b), and like them kept out of `box_measured` (c):
        - `CLKTCK`: the kernel's clock ticks a second, as `getconf CLK_TCK` gives it.
        - `CPUS`, one line for the whole machine (`cpu`) and one for each core (`cpuN`): user,
          nice, system, irq, softirq and steal of `/proc/stat` summed, in ticks. Not idle or
@@ -3288,22 +3289,32 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
          wrong number drawn as a right one. A row keeps the first 1,024 cores the probe lists
          (the kernel lists them in number order), and a core is `cpu` and at most four digits. A
          count over 2^53 is not kept: a float no longer holds it exactly.
-       - `NET`: bytes received and sent on the ONE interface the probe's shell sees beside
-         loopback (`net_rx_bytes`, `net_tx_bytes`). A worker in its own network namespace has
-         exactly one, so on such a box this is the WORKER's traffic (results, checkpoints, code
-         going in), not the machine's. The machine's whole traffic cannot be read from inside
-         that namespace; a site that wants it runs a reader on the host. A shell that sees
-         several interfaces (a box registered bare, a worker on the host's network, a container
-         runtime inside the worker) gives no line. The same byte is counted on every interface it
-         crosses, and a sum over several falls when one of them goes away, which the consumer of
-         a counter reads as a restart and counts as new traffic. No number is better than that
-         one.
+       - `NET`: bytes received and sent on the ONE interface the probe's shell sees in use
+         beside loopback (`net_rx_bytes`, `net_tx_bytes`). In use: it has carried a byte, either
+         way. A worker in its own network namespace has one such, so on such a box this is the
+         WORKER's traffic (results, checkpoints, code going in), not the machine's. The machine's
+         whole traffic cannot be read from inside that namespace; a site that wants it runs a
+         reader on the host. An interface that has carried nothing is not counted: a kernel with
+         tunnel drivers built in or loaded gives every namespace devices that never carry a byte
+         (`tunl0`, `sit0`), and counting them would leave such a worker with no reading at all,
+         while leaving them out changes no sum. A shell that sees several in use (a box
+         registered bare, a worker on the host's network, a container runtime inside the worker)
+         gives no line. The same byte is counted on every interface it crosses, and a sum over
+         several falls when one of them goes away, which the consumer of a counter reads as a
+         restart and counts as new traffic. No number is better than that one. Where such a
+         shell sees ONE in use (a bare box with one card and an idle bridge), the line is that
+         card's traffic, which is the machine's and not a worker's. An interface that starts to
+         carry bytes beside the one that did ends the line, and so the figure, until it is alone
+         again. And where the one in use goes away and another takes over, the count is the new
+         one's: the consumer sees a restart, or one interval that reads low, and no byte is
+         counted twice.
        All four are counters that start again when the machine (or the worker) does, and they
        move only when a reading is written. A consumer therefore divides a counter's change
        between two instants by the change of the reading's own time (`at`) between the same two,
        which is exact. A rate against the consumer's own clock over a window of a few readings is
-       not: with a reading a minute, a core busy all the time reads anywhere from 0 to 1.3 over
-       one minute. The
+       not: with a reading a minute and a scrape every 15 seconds, a core busy all the time
+       reads anywhere from 0 to 1.33 over a window of one minute, and further off the slower the
+       scrape. The
        on-demand probe's `box_probe` event (c) holds the machine's CPU time and the network
        bytes and leaves the per-core table out: an event row is kept for ever, and a person
        reads it.
@@ -3556,11 +3567,13 @@ them — their offers are ranked purely by cores-per-$. The gates themselves are
   `cpuN`, a count that is not a number and a second `cpu` line cost only themselves; at most
   1,024 cores are kept; the probe string, run in a real shell on this machine, gives a `CLKTCK`,
   a `cpu` line and one `cpuN` line a core that all parse, and a `NET` line exactly when this
-  machine has one interface beside loopback; the two awk programs are run on a recorded
+  machine has one interface in use beside loopback; the two awk programs are run on a recorded
   `/proc/stat` and a recorded `/proc/net/dev` (loopback, and one interface whose count has no
   space after the colon) and give the sums worked out by hand; a table of two interfaces, of
-  loopback alone or of nothing gives no `NET` line; the row holds the four fields and the
-  `box_measured` event still does not; the `box_probe` event holds them all but the per-core
+  loopback alone or of nothing gives no `NET` line; an interface that has carried nothing is
+  not counted (one in use beside two that never carried a byte gives the one's line, one that
+  never carried a byte gives none, and one that only received or only sent counts); the row
+  holds the four fields and the `box_measured` event still does not; the `box_probe` event holds them all but the per-core
   table. 25g: the probe string, run in a real shell with no v2 file and a recorded v1 counter of
   two hours of CPU time, gives that count whole; and the string holds no integer format at all
   (`%d`, `%i`, with or without a width).

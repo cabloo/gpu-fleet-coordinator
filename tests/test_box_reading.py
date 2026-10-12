@@ -304,8 +304,8 @@ def test_a_row_that_cannot_be_written_costs_the_row_and_nothing_else(tmp_path):
 
 
 def test_the_on_demand_probe_reports_the_new_fields_and_writes_no_row(tmp_path):
-    """31c: `runq box probe` answers with the parsed probe as it is, so its event gained the new
-    fields. It is a diagnosis, not a reading: no row."""
+    """31c: `runq box probe` answers with what the probe parsed (less the per-core table, 31f), so
+    its event gained the new fields. It is a diagnosis, not a reading: no row."""
     d, _ = _mk(tmp_path)
     d._sync_ssh_config = lambda: None
     d.conn.execute("INSERT INTO settings(key, value) VALUES ('probe_request_i-1', '1')")
@@ -683,12 +683,13 @@ def _busy_ticks_here():
 
 
 def _net_bytes_here():
-    """The bytes of this machine's one interface beside loopback; None when it has none or several."""
+    """The bytes of this machine's one interface in use beside loopback; None when it has none or
+    several. In use: it has carried a byte, either way."""
     rx = tx = n = 0
     for ln in Path("/proc/net/dev").read_text().splitlines()[2:]:
         name, _, rest = ln.partition(":")
-        if name.strip() != "lo":
-            f = rest.split()
+        f = rest.split()
+        if name.strip() != "lo" and int(f[0]) + int(f[8]) > 0:
             rx, tx, n = rx + int(f[0]), tx + int(f[8]), n + 1
     return (rx, tx) if n == 1 else None
 
@@ -697,7 +698,8 @@ def _net_bytes_here():
 def test_the_probe_reads_this_machines_cpu_time_and_network_bytes():
     """The real command on the real files. Counters only rise, so what the probe read lies between
     a reading taken before it ran and one taken after. The network line is there exactly when this
-    machine has one interface beside loopback (a container has; a host that runs containers has not)."""
+    machine has one interface in use beside loopback (a container has; a host that runs containers
+    has not)."""
     if not shutil.which("getconf"):
         pytest.skip("no getconf here")
     hz = os.sysconf("SC_CLK_TCK")
@@ -719,8 +721,9 @@ def test_the_probe_reads_this_machines_cpu_time_and_network_bytes():
         assert usec(cpu_before[1][core]) <= got <= usec(cpu_after[1][core]), core
     if net_before is None and net_after is None:
         assert (m["net_rx_bytes"], m["net_tx_bytes"]) == (None, None), \
-            "not one interface beside loopback here: no line"
+            "not one interface in use beside loopback here: no line"
     elif net_before is not None and net_after is not None:
+        assert m["net_rx_bytes"] is not None and m["net_tx_bytes"] is not None, "one in use: a line"
         assert net_before[0] <= m["net_rx_bytes"] <= net_after[0]
         assert net_before[1] <= m["net_tx_bytes"] <= net_after[1]
     # (an interface that came or went while the probe ran: neither is claimed)
@@ -752,7 +755,7 @@ def _probe_on(tmp_path, stat=None, net=None):
     for name, real, body in (("stat", "/proc/stat ", stat), ("net_dev", "/proc/net/dev ", net)):
         if body is not None:
             (tmp_path / name).write_text(body)
-            cmd = cmd.replace(real, f"{tmp_path / name} ")
+            cmd = cmd.replace(real, shlex.quote(str(tmp_path / name)) + " ")
     done = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     return done.stdout.splitlines()
@@ -780,6 +783,35 @@ def test_a_shell_that_sees_two_interfaces_gives_no_network_line(tmp_path):
     assert [ln for ln in lines if ln.startswith("CPUS")], "and the CPU lines are still there"
     m = disp.parse_box_probe("\n".join(lines))
     assert (m["net_rx_bytes"], m["net_tx_bytes"]) == (None, None)
+
+
+def _net_row(name, rx, tx):
+    """One row of /proc/net/dev. The packet counts are never 0, as no idle device's are, so that a
+    rule reading a packets column for a bytes one fails."""
+    return f"{name:>6}:{rx:>8} {7:>7}    0    0    0     0          0         0 {tx:>8} {5:>7}    0    0    0     0       0          0\n"
+
+
+@_A_BOXS_SHELL
+def test_an_interface_that_carried_nothing_is_not_counted(tmp_path):
+    """A kernel with tunnel drivers built in gives every network namespace devices that never carry
+    a byte. Counted, they would leave a worker there with no network reading at all; left out,
+    they change no sum."""
+    idle = _net_row("tunl0", 0, 0) + _net_row("sit0", 0, 0)
+    lines = _probe_on(tmp_path, _PROC_STAT, _PROC_NET_DEV + idle)
+    assert [ln for ln in lines if ln.startswith("NET")] == ["NET 12345678901234 222222"]
+    alone = _PROC_NET_DEV.split("  eth0")[0] + _net_row("eth0", 0, 0)
+    assert not [ln for ln in _probe_on(tmp_path, _PROC_STAT, alone) if ln.startswith("NET")], \
+        "and one that carried nothing, alone, is no reading"
+
+
+@_A_BOXS_SHELL
+@pytest.mark.parametrize("rx,tx", [(1000, 0), (0, 2000)])
+def test_an_interface_that_only_received_or_only_sent_is_in_use(tmp_path, rx, tx):
+    """Either direction is traffic: beside the first interface it makes two, and two are none."""
+    lines = _probe_on(tmp_path, _PROC_STAT, _PROC_NET_DEV + _net_row("eth1", rx, tx))
+    assert not [ln for ln in lines if ln.startswith("NET")]
+    only = _PROC_NET_DEV.split("  eth0")[0] + _net_row("eth1", rx, tx)
+    assert [ln for ln in _probe_on(tmp_path, _PROC_STAT, only) if ln.startswith("NET")] == [f"NET {rx} {tx}"]
 
 
 @_A_BOXS_SHELL

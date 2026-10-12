@@ -86,9 +86,9 @@ _HELP = {
     "fleet_box_pressure_waiting_seconds_total": ("counter", "Time some task on the box's host waited for the resource."),
     "fleet_box_pressure_stalled_seconds_total": ("counter", "Time every task on the box's host waited for the resource."),
     "fleet_box_cpu_busy_seconds_total": ("counter", "CPU time the box's whole machine spent on anything but idling and waiting for I/O."),
-    "fleet_box_cpu_core_busy_seconds_total": ("counter", "That time, for each core of a machine the site owns."),
-    "fleet_box_network_receive_bytes_total": ("counter", "Bytes received on the one interface the box's worker sees beside loopback."),
-    "fleet_box_network_transmit_bytes_total": ("counter", "Bytes sent on the one interface the box's worker sees beside loopback."),
+    "fleet_box_cpu_core_busy_seconds_total": ("counter", "CPU time each core of a machine the site owns spent on anything but idling and waiting for I/O."),
+    "fleet_box_network_receive_bytes_total": ("counter", "Bytes received on the one interface in use that the box's worker sees beside loopback."),
+    "fleet_box_network_transmit_bytes_total": ("counter", "Bytes sent on the one interface in use that the box's worker sees beside loopback."),
     "fleet_events_total": ("counter", "Events appended to the registry since the exporter started."),
     "fleet_registry_last_event_seq": ("gauge", "The newest event row the exporter has read."),
 }
