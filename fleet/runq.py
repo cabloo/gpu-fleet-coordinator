@@ -280,7 +280,10 @@ def _manifest_est_and_hint(a: argparse.Namespace, manifest: job_manifest.JobMani
         hint["colocate"] = str(a.colocate)
     if getattr(a, "force_box", False):   # dispatcher inv. 4i; the flag can only turn it ON
         hint["force_box"] = True
-    conflict = _hint_conflict(hint) or _force_box_error(a, hint)
+    # job-services spec: the job's own `services` rides on the hint, where the dispatcher reads it.
+    if manifest.services:
+        hint[registry_db.SERVICES_HINT_KEY] = list(manifest.services)
+    conflict = _hint_conflict(hint) or _force_box_error(a, hint) or _services_error(a, hint)
     if conflict:
         return None, None, conflict
     return est, (json.dumps(hint) if hint else None), None
@@ -298,6 +301,16 @@ def _force_box_error(a: argparse.Namespace, hint: dict) -> str | None:
         return None
     conn = None if api_client.enabled() else registry_db.connect(a.db)
     return registry_db.force_box_error(conn, hint)
+
+
+def _services_error(a: argparse.Namespace, hint: dict) -> str | None:
+    """`job.services` on the FINAL hint (job-services spec inv. 2), with the same transport split as
+    `_force_box_error`: on the API transport the client checks the structure and the coordinator
+    checks the names against its own `services` setting."""
+    if registry_db.SERVICES_HINT_KEY not in hint:
+        return None
+    conn = None if api_client.enabled() else registry_db.connect(a.db)
+    return registry_db.services_error(conn, hint)
 
 
 def _hint_conflict(hint: dict) -> str | None:

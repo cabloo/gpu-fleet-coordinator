@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sqlite3
 import uuid
@@ -570,6 +571,159 @@ def force_box_error(conn: sqlite3.Connection | None, resource_hint) -> str | Non
     if row["source"] != "owned":
         return (f"--force-box: box {box!r} is not an owned box (source={row['source']!r}). The "
                 f"bypass applies to owned boxes only and never causes or overrides a rental")
+    return None
+
+
+SERVICES_HINT_KEY = "services"
+SERVICES_SETTING = "services"
+SERVICE_NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+SERVICE_FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+SERVICE_VALUE_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+SERVICE_HOME_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9.-]{0,252}):([0-9]{1,5})")
+SERVICE_VALUES_FILE = "service.json"
+SERVICE_MAX_PER_TASK = 4
+SERVICE_MAX_FILES = 16
+SERVICE_MAX_FILE_BYTES = 64 * 1024
+
+
+def service_env_name(name: str) -> str:
+    """`FLEET_SERVICE_<NAME>`: the variable a task reads its service's directory from."""
+    return "FLEET_SERVICE_" + name.upper().replace("-", "_")
+
+
+def services_of_hint(resource_hint) -> list:
+    """The services a task asks for, from its stored `resource_hint_json` (or the hint dict). A hint
+    that does not parse, or a `services` that is not a list of strings, yields none here: the
+    queue-time check refuses those, and the dispatcher must never be wedged by a corrupt row."""
+    if isinstance(resource_hint, str):
+        if SERVICES_HINT_KEY not in resource_hint:
+            return []
+        try:
+            resource_hint = json.loads(resource_hint)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    v = resource_hint.get(SERVICES_HINT_KEY) if isinstance(resource_hint, dict) else None
+    if not isinstance(v, list) or not all(isinstance(n, str) for n in v):
+        return []
+    return list(v)
+
+
+def service_definition_error(name: str, definition) -> str | None:
+    """The first fault in one entry of the `services` setting (job-services spec), or None."""
+    if not SERVICE_NAME_RE.fullmatch(name):
+        return f"service name {name!r} must match {SERVICE_NAME_RE.pattern}"
+    if not isinstance(definition, dict):
+        return f"service {name!r} must be an object with `rented` and `owned`"
+    unknown = sorted(set(definition) - {"rented", "owned"})
+    if unknown:
+        return f"service {name!r} has an unknown key {unknown[0]!r}"
+    for kind in ("rented", "owned"):
+        part = definition.get(kind)
+        if not isinstance(part, dict):
+            return (f"service {name!r} needs `{kind}`: a task may land on either kind of box, and "
+                    f"each needs its own way in")
+        unknown = sorted(set(part) - {"files", "values", "tunnel"})
+        if unknown:
+            return f"service {name!r}.{kind} has an unknown key {unknown[0]!r}"
+        files = part.get("files")
+        if files is not None and not (isinstance(files, str) and files.startswith("/")):
+            return f"service {name!r}.{kind}.files must be an absolute path"
+        values = part.get("values", {})
+        if not isinstance(values, dict):
+            return f"service {name!r}.{kind}.values must be an object"
+        for k, v in values.items():
+            if not SERVICE_VALUE_KEY_RE.fullmatch(k):
+                return f"service {name!r}.{kind}.values key {k!r} must match {SERVICE_VALUE_KEY_RE.pattern}"
+            if not isinstance(v, (str, int, float, bool)):
+                return f"service {name!r}.{kind}.values.{k} must be a string, number or boolean"
+        tunnel = part.get("tunnel")
+        if kind == "owned":
+            if tunnel is not None:
+                return (f"service {name!r}.owned takes no tunnel: an owned box reaches home on "
+                        f"the LAN")
+            continue
+        if not isinstance(tunnel, dict) or set(tunnel) != {"home", "box_port"}:
+            return f"service {name!r}.rented needs `tunnel`: {{\"home\": \"HOST:PORT\", \"box_port\": N}}"
+        home = tunnel["home"]
+        m = SERVICE_HOME_RE.fullmatch(home) if isinstance(home, str) else None
+        if m is None or not 1 <= int(m.group(2)) <= 65535:
+            return f"service {name!r}.rented.tunnel.home must be HOST:PORT, got {home!r}"
+        port = tunnel["box_port"]
+        if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
+            return f"service {name!r}.rented.tunnel.box_port must be a port from 1024 to 65535"
+    return None
+
+
+def service_port_clash(defined: dict, name: str) -> str | None:
+    """Another service of the `services` setting whose rented tunnel uses `name`'s box port, as a
+    fault, or None (job-services spec: one box port carries one tunnel, and a box may hold tasks
+    asking for both). An entry with a fault of its own is not compared: it fails on its own."""
+    def port(n):
+        d = defined.get(n)
+        if not isinstance(d, dict) or service_definition_error(n, d) is not None:
+            return None
+        return d["rented"]["tunnel"]["box_port"]
+
+    mine = port(name)
+    if mine is None:
+        return None
+    for other in sorted(defined):
+        if other != name and port(other) == mine:
+            return f"services {name!r} and {other!r} both use box port {mine}"
+    return None
+
+
+def load_services(conn: sqlite3.Connection) -> dict:
+    """The `services` setting, read LIVE (a change needs no restart). `{}` when absent; a row that
+    does not parse or is not an object reads as `{}`, so nothing is offered rather than anything
+    guessed."""
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (SERVICES_SETTING,)).fetchone()
+    if row is None:
+        return {}
+    try:
+        value = json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def services_error(conn: sqlite3.Connection | None, resource_hint) -> str | None:
+    """Why this hint may NOT carry `services` (job-services spec inv. 2), or None if it is coherent.
+
+    Same two boundaries and the same split as `force_box_error`: `conn=None` checks the structure
+    only (a `runq` on the API transport holds no registry of record), and the coordinator's API
+    checks the names against its own `services` row."""
+    if isinstance(resource_hint, str):
+        if SERVICES_HINT_KEY not in resource_hint:
+            return None
+        try:
+            resource_hint = json.loads(resource_hint)
+        except (json.JSONDecodeError, TypeError):
+            return "resource_hint_json names services but is not valid JSON"
+    hint = resource_hint if isinstance(resource_hint, dict) else {}
+    if SERVICES_HINT_KEY not in hint:
+        return None
+    names = hint[SERVICES_HINT_KEY]
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        return f"services must be a list of service names, got {names!r}"
+    if len(set(names)) != len(names):
+        return f"services names one service twice: {names!r}"
+    if len(names) > SERVICE_MAX_PER_TASK:
+        return f"a task may ask for at most {SERVICE_MAX_PER_TASK} services, got {len(names)}"
+    for n in names:
+        if not SERVICE_NAME_RE.fullmatch(n):
+            return f"service name {n!r} must match {SERVICE_NAME_RE.pattern}"
+    if conn is None or not names:
+        return None
+    defined = load_services(conn)
+    for n in names:
+        if n not in defined:
+            known = ", ".join(sorted(defined)) or "none"
+            return (f"no service {n!r} is defined in this coordinator's `services` setting "
+                    f"(defined: {known})")
+        err = service_definition_error(n, defined[n]) or service_port_clash(defined, n)
+        if err is not None:
+            return f"the `services` setting is wrong: {err}"
     return None
 
 

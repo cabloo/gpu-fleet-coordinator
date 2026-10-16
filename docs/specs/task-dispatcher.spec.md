@@ -1565,7 +1565,10 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
     are initiated home→box; the payload is a working-tree snapshot (committed + uncommitted,
     `.gitignore`-aware; `git archive` fallback for pre-snapshot tasks) into which no credential
     material is ever staged — same push-only, no-secrets-on-box model as all existing launch
-    scripts.
+    scripts. **The one exception is a job service** (`job-services.spec.md`): a task whose job
+    asks for a service gets that service's files on its box while it runs there, written over
+    ssh's standard input and never into a command line, `task.json`, the bundle, the registry or a
+    log. A task that does not ask gets nothing.
 14. **Composability:** a whole sweep is one task (`entrypoint` invoking
     `sweep_supervisor.py --sweep …` with `slots = slots_total`) — the dispatcher does not know
     the difference; rungs/gates stay entirely inside the supervisor per its spec.

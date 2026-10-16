@@ -277,7 +277,10 @@ When a setting takes effect depends on who reads it:
 - the dispatcher reads most settings once, at start: restart it after a change;
 - `bundle_compile` and its companions are read by `runq` each time it queues;
 - `launch_gate`, `box_reading_every_min`, the worker-roll limits, the two data-root marks and
-  per-box rows are read on every pass.
+  per-box rows are read on every pass;
+- `services` (the home services a job may ask for: their files, and a tunnel for rented boxes;
+  [job services](specs/job-services.spec.md)) is read each time it is used, by `runq`, the API
+  and the dispatcher.
 
 **Eight settings are reset at start if they hold a default that was later replaced**, because the
 dispatcher cannot tell an old default from your choice of the same value. Writing the left-hand

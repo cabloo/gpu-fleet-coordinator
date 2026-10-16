@@ -42,6 +42,7 @@ the job, so a new kind of job needs no change to the coordinator.
 | `resources.requires_gpu` | `true` restricts the job to boxes registered with a GPU, and charges it the default 0.6 GB when `vram_gb` is absent. Omitted or `false`, the job may land on a box without a card and is charged no GPU memory. |
 | `resources.box` | run only on this box: an instance id or an owned box's label. |
 | `resources.force_box` | with `box`, on an owned box: skip the admission gates. |
+| `services` | home services this job uses, by name (default none). Each must be defined in the coordinator's `services` setting, or the queue client refuses the job. The task finds the service's files in the directory named by `FLEET_SERVICE_<NAME>` (a path beginning `~/`: expand it), and on a rented box reaches the service through a tunnel to a port of its own loopback. That tunnel may refuse connections for up to one poll cycle after the task starts or after it drops, so retry a refused connection. Every task on the box runs as the same user, so another task there can read the files too. See [job services](specs/job-services.spec.md). |
 
 A job estimated at more than 10 minutes must declare `resume`, either with a flag or with a reason
 under `none`. The queue client refuses it otherwise, because a lost box would restart it from zero.

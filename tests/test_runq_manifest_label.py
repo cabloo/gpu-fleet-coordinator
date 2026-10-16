@@ -79,6 +79,7 @@ class _Manifest:
     def __init__(self, run, resources):
         self.run = run
         self.resources = resources
+        self.services = []
 
 
 class _Args:

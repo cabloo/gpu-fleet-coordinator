@@ -47,6 +47,9 @@ class JobManifest:
     #: resume. Lives on the artifact, not on the queue-time invocation, so `check_submittable` and
     #: any auditor read the same bytes. See `check_submittable` for why that matters.
     no_resume_reason: str | None = None
+    #: `services: ["<name>", ...]` — home services this job asks for (job-services spec). Copied by
+    #: `runq` into the task's `resource_hint_json`, which is what the dispatcher reads.
+    services: list = field(default_factory=list)
 
 
 def _require(cond: bool, msg: str) -> None:
@@ -139,9 +142,14 @@ def parse(data: dict) -> JobManifest:
         _require(isinstance(resources["force_box"], bool),
                  "resources.force_box must be a boolean (true/false)")
 
+    # STRUCTURE only, for the same reason as `force_box`: whether each name is a service this site
+    # defines is checked at the submission boundary (`registry_db.services_error`).
+    services = data.get("services", [])
+    _require(_is_str_list(services), "services must be a list of strings")
     return JobManifest(run=list(run), completion_artifact=ca, resume_flag=resume_flag,
                        resume_checkpoint=resume_ckpt, pip=list(pip), apt=list(apt),
-                       resources=dict(resources), no_resume_reason=no_resume_reason)
+                       resources=dict(resources), no_resume_reason=no_resume_reason,
+                       services=list(services))
 
 
 #: The checkpoint+resume rule's threshold (owner directive 2026-07-14): "all tasks that take longer
@@ -201,6 +209,8 @@ def to_dict(m: JobManifest) -> dict:
         d["setup"] = {"pip": list(m.pip), "apt": list(m.apt)}
     if m.resources:
         d["resources"] = dict(m.resources)
+    if m.services:
+        d["services"] = list(m.services)
     return d
 
 

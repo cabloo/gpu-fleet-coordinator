@@ -21,6 +21,7 @@ incident that produced them, which is the fastest way to learn why a rule exists
 | [calibration](calibration.spec.md) | the expected-against-actual report |
 | [fleet-utilization-monitor](fleet-utilization-monitor.spec.md) | finding under-used capacity and proposing the fix |
 | [experiments-retention](experiments-retention.spec.md) | bounding the data root |
+| [job-services](job-services.spec.md) | a home service a job asks for: its files on the box, and a reverse tunnel on a rented box |
 | [free-space-guard](free-space-guard.spec.md) | what the dispatcher does when the data root runs low anyway: hold, alert, fail nothing |
 | [metrics-exporter](metrics-exporter.spec.md) | the registry's state as Prometheus text: queue, poll cycle, data root, each box's newest reading |
 

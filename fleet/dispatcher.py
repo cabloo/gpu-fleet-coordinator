@@ -24,6 +24,8 @@ import datetime
 import errno
 import fcntl
 import hashlib
+import io
+import ipaddress
 import json
 import math
 import os
@@ -34,6 +36,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -611,6 +614,10 @@ DEFAULT_SETTINGS = {
     # from (measured ~5 GB/day). A site with a small data root must lower both.
     "data_root_hold_free_gb": 5,
     "data_root_resume_free_gb": 10,
+    # job-services spec: the home services a job may ask for (`job.services`), by name. `{}` offers
+    # none, so no task may ask. Read from the registry each time it is used, so a change needs no
+    # restart; a NEW key, so `_ensure_settings` seeds it, and a site writes its own row over it.
+    "services": {},
 }
 DEFAULT_PRIORITY = 50  # registry spec schema default — invariant 4d's bypass threshold
 
@@ -3222,6 +3229,347 @@ def capacity_push_cmd(payload: str | None) -> str:
 
 
 # --------------------------------------------------------------------------------------------
+# Job services (docs/specs/job-services.spec.md): a home service's files on the box, and on a rented
+# box an ssh reverse tunnel to it — only for a task whose job asks for the service.
+# --------------------------------------------------------------------------------------------
+
+SERVICE_REMOTE_ROOT = "~/spool/services"
+SERVICE_OPEN_STATES = ("claimed", "shipped", "running", "preempting", "cancelling")
+SERVICE_BOX_STATES = ("live", "paused", "draining")
+SERVICE_LOST_FORGET_S = 24 * 3600   # inv. 10: a box `lost` this long is taken for gone
+SERVICE_FILES_ROW = "service_files_i{}"      # per box: the services whose files are there (inv. 10)
+TUNNEL_STOP_GRACE_S = 5.0
+_FORWARD_REFUSED = "remote port forwarding failed"
+
+
+class ServiceUnavailable(Exception):
+    """A service a task asks for cannot be given to it (job-services inv. 3)."""
+
+
+def service_kind(inst: dict) -> str:
+    """Which half of a service's definition a box gets: `owned` boxes reach home on the LAN."""
+    return "owned" if inst.get("source") == "owned" else "rented"
+
+
+def read_service_files(directory: str) -> dict:
+    """`{name: bytes}` of the regular files directly in `directory` whose names may be sent
+    (job-services inv. 4). A link, a directory or a name the pattern refuses is skipped; each file
+    is opened without following a link and read through that one descriptor. Raises
+    ServiceUnavailable when the directory cannot be read or a limit is passed."""
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as e:
+        raise ServiceUnavailable(f"cannot read {directory}: {e.strerror or e}") from None
+    out: dict = {}
+    for name in names:
+        if not registry_db.SERVICE_FILE_RE.fullmatch(name):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                continue                       # a link: never followed, never sent
+            raise ServiceUnavailable(f"cannot read {path}: {e.strerror or e}") from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                continue
+            if name == registry_db.SERVICE_VALUES_FILE:
+                raise ServiceUnavailable(f"{path}: `{name}` is the name the service's values are "
+                                         f"written to, so no file may carry it")
+            chunks, size = [], 0
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > registry_db.SERVICE_MAX_FILE_BYTES:
+                    raise ServiceUnavailable(f"{path} is larger than "
+                                             f"{registry_db.SERVICE_MAX_FILE_BYTES} bytes")
+                chunks.append(chunk)
+        except OSError as e:
+            raise ServiceUnavailable(f"cannot read {path}: {e.strerror or e}") from None
+        finally:
+            os.close(fd)
+        out[name] = b"".join(chunks)
+        if len(out) > registry_db.SERVICE_MAX_FILES:
+            raise ServiceUnavailable(f"{directory} holds more than "
+                                     f"{registry_db.SERVICE_MAX_FILES} files to send")
+    return out
+
+
+def service_tar(files: dict, values: dict) -> bytes:
+    """One uncompressed tar of a service's files plus `service.json`, each mode 0600, owned by
+    nobody in particular (the box extracts it without restoring owners)."""
+    entries = dict(files)
+    entries[registry_db.SERVICE_VALUES_FILE] = (json.dumps(values, sort_keys=True) + "\n").encode()
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        for name in sorted(entries):
+            data = entries[name]
+            info = tarfile.TarInfo(name)
+            info.size, info.mode, info.mtime = len(data), 0o600, 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def service_write_cmd(name: str) -> str:
+    """Remote command: the tar on stdin becomes `~/spool/services/<name>/` (job-services inv. 4).
+    It is unpacked beside the directory, then moved INTO it file by file: each `mv` is one rename,
+    which replaces that one file whole, so the directory a running task reads never disappears and
+    no file is ever half written. A file the new set lacks is removed first; a link or a directory
+    standing where a file goes is removed rather than followed. The first write, or one meeting a
+    link or a non-directory at the directory's name, moves the whole new directory into place; a
+    link at `~/spool/services` itself is removed first. `name` matches `SERVICE_NAME_RE`, so it
+    needs no quoting."""
+    d, r = f"{SERVICE_REMOTE_ROOT}/{name}", SERVICE_REMOTE_ROOT
+    return (f"umask 077 && {{ [ ! -L {r} ] || rm -f {r}; }} && mkdir -p {r} && rm -rf {d}.new {d}.old "
+            f"&& mkdir {d}.new && tar -x -o -C {d}.new -f - && chmod 0700 {d}.new && "
+            f"if [ -d {d} ] && [ ! -L {d} ]; then chmod 0700 {d} && "
+            f"for f in {d}/* {d}/.[!.]* {d}/..?*; do n=${{f##*/}}; if [ -e \"$f\" ] || [ -L \"$f\" ]; then "
+            f"[ -e {d}.new/\"$n\" ] || rm -rf \"$f\" || exit 1; fi; done && "
+            f"for f in {d}.new/*; do [ -e \"$f\" ] || continue; n=${{f##*/}}; "
+            f"if [ -L {d}/\"$n\" ] || [ -d {d}/\"$n\" ]; then rm -rf {d}/\"$n\" || exit 1; fi; "
+            f"mv -f \"$f\" {d}/\"$n\" || exit 1; done && rmdir {d}.new; "
+            f"else rm -rf {d} && mv {d}.new {d}; fi")
+
+
+def service_remove_cmd(name: str) -> str:
+    """Remote command removing a service's files from a box (job-services inv. 10)."""
+    d = f"{SERVICE_REMOTE_ROOT}/{name}"
+    return f"rm -rf {d} {d}.new {d}.old"
+
+
+def tunnel_forward(box_port: int, home: str) -> str:
+    """The `-R` value of a tunnel (inv. 6), also recorded in its pid file (inv. 8)."""
+    return f"127.0.0.1:{int(box_port)}:{home}"
+
+
+def tunnel_cmd(host: str, port: int, box_port: int, home: str) -> list:
+    """The reverse tunnel of job-services inv. 6: the box's `127.0.0.1:<box_port>` leads to `home`
+    as the coordinator sees it, and nowhere else. Same endpoint and identity as `ssh_cmd`."""
+    base = ssh_cmd(host, port)
+    return [*base[:-1], "-N", "-T", "-n",
+            "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=4", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
+            "-o", "PermitLocalCommand=no", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+            "-R", tunnel_forward(box_port, home), base[-1]]
+
+
+def tunnel_listener_cleanup_cmd(box_port: int) -> str:
+    """Remote command ending the `sshd` connection process that still listens on the box's
+    `127.0.0.1:<box_port>`: an earlier tunnel's, which the box has not yet noticed is dead
+    (job-services inv. 6). A tunnel opens no session (`ssh -N`), so that process keeps the title
+    sshd gives a connection before any session, `sshd: USER` (`sshd-session: USER` from OpenSSH
+    9.8); one that has a session is `sshd: USER@...`. Only those titles, for the user this command
+    runs as, are signalled: never a title holding `[` (the server's own listener, a privileged
+    monitor `[priv]`, `[postauth]`, `[net]`), another user's, or anything on another address. A
+    box without `ss` is left alone."""
+    return ("command -v ss >/dev/null 2>&1 || exit 0; u=$(id -un) || exit 0; "
+            f"ss -Hltnp 'src 127.0.0.1:{int(box_port)}' 2>/dev/null "
+            "| grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | while read -r p; do "
+            "c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null) || continue; "
+            "while [ \"${c% }\" != \"$c\" ]; do c=${c% }; done; "
+            "case \"$c\" in *'['*) continue ;; esac; "
+            "case \"$c\" in \"sshd: $u\"|\"sshd-session: $u\"|\"sshd: $u@\"*|\"sshd-session: $u@\"*) "
+            "kill \"$p\" ;; esac; done; exit 0")
+
+
+TUNNEL_READ_MARK = "fleet-proc-net-tcp-read"
+# The mark is printed only when /proc/net/tcp itself was read, so an empty answer cannot pass for
+# "nothing listens there" (inv. 6a).
+TUNNEL_LISTEN_CMD = (f"cat /proc/net/tcp && echo {TUNNEL_READ_MARK}; "
+                     "cat /proc/net/tcp6 2>/dev/null; exit 0")
+TUNNEL_UNSEEN_MAX = 2      # inv. 6a: reads of a live tunnel that saw no listener before it is closed
+
+
+def _listen_address(hexaddr: str) -> str | None:
+    """An address as `/proc/net/tcp{,6}` prints it, readable. Those files print each 32-bit word in
+    the host's byte order; every box this fleet rents is little-endian (x86_64, arm64)."""
+    try:
+        raw = bytes.fromhex(hexaddr)
+    except ValueError:
+        return None
+    if len(raw) == 4:
+        return str(ipaddress.IPv4Address(raw[::-1]))
+    if len(raw) == 16:
+        return str(ipaddress.IPv6Address(b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4))))
+    return None
+
+
+def tunnel_listeners(proc_net_tcp: str, box_port: int) -> list:
+    """The addresses listening on `box_port`, from `TUNNEL_LISTEN_CMD`'s output (inv. 6a)."""
+    out = []
+    for line in proc_net_tcp.splitlines():
+        f = line.split()
+        if len(f) < 4 or f[3] != "0A" or ":" not in f[1]:       # 0A: LISTEN
+            continue
+        addr, _, port = f[1].rpartition(":")
+        try:
+            if int(port, 16) != int(box_port):
+                continue
+        except ValueError:
+            continue
+        a = _listen_address(addr)
+        out.append(a if a is not None else addr)
+    return sorted(set(out))
+
+
+def is_loopback_listener(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return ip.is_loopback or (mapped is not None and mapped.is_loopback)
+
+
+def _run_input_or_timeout(run, cmd, data: bytes, timeout: int) -> subprocess.CompletedProcess:
+    """`_run_or_timeout` with `data` on the command's standard input: how a service's files reach a
+    box without ever being in a command line (job-services inv. 4). Text out, bytes in."""
+    if run is not subprocess.run:
+        try:
+            return run(cmd, input=data, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=f"timeout after {timeout}s")
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        out, err = proc.communicate(input=data, timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out.decode(errors="replace"),
+                                           err.decode(errors="replace"))
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.communicate(timeout=5)
+        return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=f"timeout after {timeout}s")
+
+
+def ssh_run_input(host: str, port: int, remote_cmd: str, data: bytes,
+                  run=subprocess.run) -> subprocess.CompletedProcess:
+    return _run_input_or_timeout(run, ssh_cmd(host, port) + [remote_cmd], data, 60)
+
+
+@dataclass
+class _Tunnel:
+    """One open reverse tunnel (job-services inv. 6). Held in memory only as a process handle: the
+    WANTED set is derived from the registry on every pass, and the pid file is what lets a restarted
+    dispatcher end a tunnel it no longer holds (inv. 8). `checked`: its port on the box has been
+    seen listening on the loopback alone; `unseen`: reads that saw it listening nowhere (inv. 6a)."""
+    proc: object
+    endpoint: tuple
+    box_port: int
+    home: str
+    err_path: Path
+    pid_path: Path
+    checked: bool = False
+    unseen: int = 0
+
+
+def _signal_tunnel(proc, sig) -> None:
+    """To the group the tunnel leads (it starts in its own session), so nothing it started outlives
+    it; to the process alone when it leads no group (a stand-in, in tests)."""
+    try:
+        if os.getpgid(proc.pid) == proc.pid:
+            os.killpg(proc.pid, sig)
+            return
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        proc.send_signal(sig)
+
+
+def _stop_tunnel_process(proc) -> None:
+    """SIGTERM to its group, then SIGKILL after `TUNNEL_STOP_GRACE_S` (inv. 6). `poll()` is None
+    first, so the pid is still this child's: it has not been reaped, and cannot have been reused."""
+    if proc.poll() is not None:
+        return
+    _signal_tunnel(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=TUNNEL_STOP_GRACE_S)
+    except subprocess.TimeoutExpired:
+        _signal_tunnel(proc, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+
+
+def _proc_stat(pid: int) -> tuple | None:
+    """`(state, start)` of a process from `/proc/<pid>/stat` (fields 3 and 22; `start` in clock
+    ticks since boot), or None when there is no such process."""
+    try:
+        text = Path(f"/proc/{int(pid)}/stat").read_text()
+        rest = text[text.rindex(")") + 2:].split()
+        return rest[0], int(rest[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    """`data` into `path`, whole or not at all: a new file beside it (mode 0600, no link followed),
+    then one rename, which replaces a link at `path` rather than following it."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{os.urandom(4).hex()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _tunnel_pid_record(pid: int, forward: str) -> dict:
+    """What a tunnel's pid file holds (inv. 8): enough to tell, after a restart, that the pid is
+    still that tunnel and not a process that took its number."""
+    st = _proc_stat(pid)
+    return {"pid": pid, "start": st[1] if st else None, "forward": forward}
+
+
+def _end_recorded_tunnel(pid: int, start: int) -> None:
+    """Inv. 8: SIGTERM to the group a tunnel an earlier dispatcher left behind leads, SIGKILL after
+    `TUNNEL_STOP_GRACE_S`, each only while `pid` is still the process that started at `start`."""
+    def alive() -> bool:
+        st = _proc_stat(pid)
+        return st is not None and st[1] == start and st[0] not in ("Z", "X")
+
+    def send(sig) -> None:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, sig)
+            else:
+                os.kill(pid, sig)
+
+    send(signal.SIGTERM)
+    deadline = time.monotonic() + TUNNEL_STOP_GRACE_S
+    while alive() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if alive():
+        send(signal.SIGKILL)
+
+
+def _file_tail(path: Path, n: int = 300) -> str:
+    try:
+        return " ".join(path.read_text(errors="replace").split())[-n:]
+    except OSError:
+        return ""
+
+
+def _is_tunnel_cmdline(argv: list, forward: str) -> bool:
+    """Whether a process's argv is the `tunnel_cmd` that forwards `forward` (inv. 8: only that is
+    ever ended)."""
+    if not argv or os.path.basename(argv[0]) != "ssh" or "-N" not in argv or "-R" not in argv:
+        return False
+    if "ControlPath=none" not in argv or "ExitOnForwardFailure=yes" not in argv:
+        return False
+    i = argv.index("-R")
+    return i + 1 < len(argv) and argv[i + 1] == forward
+
+
+# --------------------------------------------------------------------------------------------
 # vastai CLI wrapper — thin, defensive JSON parsing (Input contract trust boundary).
 # --------------------------------------------------------------------------------------------
 
@@ -3332,6 +3680,8 @@ class Dispatcher:
     # cannot be read. None = `data_root_free_bytes` (one statvfs). The ONE seam the reading goes
     # through, so a test plants a full or a healthy volume without owning one.
     free_bytes: object = None
+    # job-services inv. 6: how a tunnel's long-lived ssh is started. None = `subprocess.Popen`.
+    popen: object = None
 
     def __post_init__(self):
         self.conn = registry_db.connect(self.db_path)
@@ -3341,6 +3691,14 @@ class Dispatcher:
             self.tracker = ConnectionTracker(self.settings)
         if self.vastai_run is None:
             self.vastai_run = self.run
+        if self.popen is None:
+            self.popen = subprocess.Popen
+        # job-services inv. 8: process handles only; what is WANTED is re-derived every pass.
+        self._tunnels: dict = {}
+        self._tunnel_pids_swept = False
+        # inv. 6a: (box, service) pairs whose tunnel listened beyond the box's loopback. In memory:
+        # a restarted dispatcher opens such a tunnel once more and checks it again.
+        self._tunnels_exposed: set = set()
         self._last_ckpt_pull: dict[int, float] = {}
         # Last balance actually OBSERVED from the API. In-memory by design (a restart simply
         # re-reads it on the first successful poll, like `_box_res`): its only job is to stop a
@@ -3938,6 +4296,10 @@ class Dispatcher:
         if not self.dry_run:
             if not holding:
                 timed("consolidate", self._consolidate)  # invariant 21: drain paid boxes onto free capacity
+            # job-services inv. 6: tunnels follow the open tasks that ask, held or not, and open
+            # before this pass's ships so a task's tunnel is opening by the time its bundle lands.
+            timed("service_tunnels", self._reconcile_service_tunnels)
+            if not holding:
                 timed("ship", self._ship_all)
             timed("teardown", self._teardown_idle)
             timed("gc_staging", self._gc_ship_staging)  # inv. 12: .ship/ leaked 106GB / 2783 dirs
@@ -7744,6 +8106,11 @@ class Dispatcher:
         # else has filled, and the over-pack reaper would learn that hold as a capacity ceiling.
         if lane_vram_gb(self._effective_hint(row), self.settings) <= 0:
             env[NO_GPU_ENV] = "1"
+        # job-services inv. 11: where the service's files are. A path under the worker's home, which
+        # the task expands; never a secret.
+        for name in registry_db.services_of_hint(row.get("resource_hint_json")):
+            if registry_db.SERVICE_NAME_RE.fullmatch(name):
+                env[registry_db.service_env_name(name)] = f"{SERVICE_REMOTE_ROOT}/{name}"
         return {
             # "python" stays literal here -- the box's own interpreter may live somewhere
             # entirely different from this (dispatcher/home) machine's sys.executable; the
@@ -8255,6 +8622,318 @@ class Dispatcher:
             return None, "compiled"
         return data, (task.get("code_format") or "compiled")
 
+    # -- job services (docs/specs/job-services.spec.md) --
+    def _service_payloads(self, task: dict, inst: dict) -> list:
+        """Inv. 3: `[{"name", "tar", "files"}]` for each service the task asks for, from the half of
+        its definition this box's kind gets. Raises ServiceUnavailable. Read LIVE."""
+        names = registry_db.services_of_hint(task.get("resource_hint_json"))
+        if not names:
+            return []
+        defined = registry_db.load_services(self.conn)
+        kind = service_kind(inst)
+        out = []
+        for name in names:
+            if name not in defined:
+                raise ServiceUnavailable(f"service {name!r} is not defined in the `services` setting")
+            err = (registry_db.service_definition_error(name, defined[name])
+                   or registry_db.service_port_clash(defined, name))
+            if err is not None:
+                raise ServiceUnavailable(f"the `services` setting is wrong: {err}")
+            part = defined[name][kind]
+            files = read_service_files(part["files"]) if part.get("files") else {}
+            out.append({"name": name, "tar": service_tar(files, part.get("values", {})),
+                        "files": sorted(files)})
+        return out
+
+    def _service_files_row(self, iid: int) -> list:
+        row = self.conn.execute("SELECT value FROM settings WHERE key=?",
+                                (SERVICE_FILES_ROW.format(iid),)).fetchone()
+        try:
+            names = json.loads(row["value"]) if row is not None else []
+        except (json.JSONDecodeError, TypeError):
+            names = []
+        return [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
+
+    def _write_service_files_row(self, iid: int, names: list) -> None:
+        key = SERVICE_FILES_ROW.format(iid)
+        if names:
+            self.conn.execute("INSERT INTO settings(key, value) VALUES (?,?) "
+                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                              (key, json.dumps(sorted(set(names)))))
+        else:
+            self.conn.execute("DELETE FROM settings WHERE key=?", (key,))
+        self.conn.commit()
+
+    def _note_service_files(self, iid: int, name: str) -> None:
+        names = self._service_files_row(iid)
+        if name not in names:
+            self._write_service_files_row(iid, [*names, name])
+
+    def _tunnel_dir(self) -> Path:
+        return EXPERIMENTS_ROOT / ".dispatcher" / "tunnels"
+
+    def _private_tunnel_dir(self) -> Path:
+        """The tunnels' directory, 0700: the dispatcher's umask leaves new directories group-writable,
+        and nobody else may plant a file or a link where it writes a tunnel's files."""
+        tdir = self._tunnel_dir()
+        tdir.mkdir(parents=True, exist_ok=True)
+        if tdir.is_symlink():
+            raise OSError(f"{tdir} is a link: no tunnel's file is written through one")
+        os.chmod(tdir, 0o700)
+        return tdir
+
+    def _reconcile_service_tunnels(self) -> None:
+        """Invariants 6, 8 and 10: one reverse tunnel per rented box and service while an open task
+        there asks, and a service's files only on a box where one does. Never raises: a fault here
+        is logged, and the poll loop goes on to ship."""
+        try:
+            self._reconcile_service_tunnels_once()
+        except Exception as e:  # noqa: BLE001 - the poll loop has no handler; never kill it from here
+            self.log("service_tunnels_failed", f"{type(e).__name__}: {e}")
+
+    def _reconcile_service_tunnels_once(self) -> None:
+        if not self._tunnel_pids_swept:
+            self._sweep_tunnel_pids()
+            self._tunnel_pids_swept = True
+        services = registry_db.load_services(self.conn)
+        rows = self.conn.execute(
+            "SELECT t.resource_hint_json AS task_hint, i.* FROM tasks t "
+            "JOIN instances i ON t.instance_id = i.id "
+            f"WHERE t.state IN ({','.join('?' * len(SERVICE_OPEN_STATES))}) "
+            f"AND i.state IN ({','.join('?' * len(SERVICE_BOX_STATES))}) "
+            "AND t.resource_hint_json LIKE '%services%'",
+            (*SERVICE_OPEN_STATES, *SERVICE_BOX_STATES)).fetchall()
+        asked: dict = {}                 # box id -> the services an open task there asks for
+        insts: dict = {}
+        for r in rows:
+            r = dict(r)
+            names = registry_db.services_of_hint(r.pop("task_hint"))
+            if names:
+                asked.setdefault(r["id"], set()).update(names)
+                insts[r["id"]] = r
+        wanted: dict = {}
+        for iid, names in asked.items():
+            if service_kind(insts[iid]) == "owned":
+                continue                                          # inv. 9
+            for name in sorted(names):
+                d = services.get(name)
+                if (d is None or registry_db.service_definition_error(name, d) is not None
+                        or registry_db.service_port_clash(services, name) is not None):
+                    continue                                      # inv. 3 fails it at its ship
+                t = d["rented"]["tunnel"]
+                wanted[(iid, name)] = (insts[iid], int(t["box_port"]), t["home"])
+        # Forgotten only once no open task on the box asks, whatever the setting says meanwhile.
+        self._tunnels_exposed = {k for k in self._tunnels_exposed if k[1] in asked.get(k[0], set())}
+        for key in [k for k in self._tunnels if k not in wanted]:
+            self._tunnel_step(key, self._close_tunnel, key, "no open task on the box asks for it")
+        for key, (inst, box_port, home) in wanted.items():
+            self._tunnel_step(key, self._keep_tunnel, key, inst, box_port, home)
+        self._remove_unasked_service_files(asked)
+
+    def _tunnel_step(self, key: tuple, fn, *args) -> None:
+        """One box and service's part of the phase (inv. 6): a fault there is logged with the box,
+        and the phase goes on to the next."""
+        try:
+            fn(*args)
+        except Exception as e:  # noqa: BLE001 - one box's fault must not starve the others
+            self.log("service_tunnels_failed", f"service {key[1]}: {type(e).__name__}: {e}",
+                     instance_id=key[0])
+
+    def _keep_tunnel(self, key: tuple, inst: dict, box_port: int, home: str) -> None:
+        iid, name = key
+        if key in self._tunnels_exposed:
+            return                                                # inv. 6a: not opened again
+        host, port = endpoint_for(inst, self.tracker, self.vastai_run)
+        cur = self._tunnels.get(key)
+        refused = False
+        if cur is not None:
+            rc = cur.proc.poll()
+            if rc is None:
+                if cur.endpoint == (host, port) and cur.box_port == box_port and cur.home == home:
+                    if not cur.pid_path.exists():
+                        self._record_tunnel(key, cur)             # inv. 8: written again until it is
+                    if not cur.checked:
+                        self._check_tunnel_listener(key, cur)
+                    return
+                self._close_tunnel(key, "its endpoint or its setting changed")
+            else:
+                why = _file_tail(cur.err_path)
+                refused = _FORWARD_REFUSED in why
+                self.log("service_tunnel_down", json.dumps({"service": name, "rc": rc, "why": why}),
+                         instance_id=iid)
+                self._tunnels.pop(key, None)
+                with contextlib.suppress(OSError):
+                    cur.pid_path.unlink()
+        if refused:
+            ssh_run(host, port, tunnel_listener_cleanup_cmd(box_port), run=self.run)
+        self._open_tunnel(key, host, port, box_port, home)
+
+    def _check_tunnel_listener(self, key: tuple, t: _Tunnel) -> None:
+        """Inv. 6a: the box's sshd decides where a reverse forward listens, and one set to
+        `GatewayPorts yes` ignores the loopback address asked for. So read where the port listens,
+        once per tunnel; a listener beyond the loopback closes the tunnel and keeps it closed."""
+        iid, name = key
+        host, port = t.endpoint
+        out = ssh_run(host, port, TUNNEL_LISTEN_CMD, run=self.run)
+        if out.returncode != 0:
+            return                                                # ssh failed: the next pass reads again
+        text = out.stdout or ""
+        listen = tunnel_listeners(text, t.box_port) if TUNNEL_READ_MARK in text else []
+        exposed = [a for a in listen if not is_loopback_listener(a)]
+        if exposed:
+            self._shut_unchecked_tunnel(key, "its port on the box listened beyond the box's loopback",
+                                        {"service": name, "box_port": t.box_port, "listen": exposed},
+                                        f"listened on {', '.join(exposed)}, beyond the box's loopback "
+                                        f"(its sshd may set GatewayPorts, or another program holds "
+                                        f"that port there)")
+        elif listen:
+            t.checked = True
+            self.log("service_tunnel_checked", json.dumps({"service": name, "listen": listen}),
+                     instance_id=iid)
+        else:
+            # Alive with ExitOnForwardFailure=yes, so the box took the forward: a listener nobody can
+            # see means the read is blind, not that the port is safe. Closed after the second such read.
+            t.unseen += 1
+            if t.unseen >= TUNNEL_UNSEEN_MAX:
+                self._shut_unchecked_tunnel(key, "its port on the box could not be seen listening",
+                                            {"service": name, "box_port": t.box_port, "listen": []},
+                                            "could not be seen listening on the box (/proc/net/tcp "
+                                            "unreadable there, or the listener hidden), so where it "
+                                            "listens is not known")
+
+    def _shut_unchecked_tunnel(self, key: tuple, why: str, detail: dict, said: str) -> None:
+        """Inv. 6a: close a tunnel whose far end is not known to listen on the loopback alone, and
+        keep it closed. Held closed FIRST, so a fault in the close cannot let the next pass reopen it."""
+        iid, name = key
+        self._tunnels_exposed.add(key)
+        self._close_tunnel(key, why)
+        self.log("service_tunnel_exposed", json.dumps(detail), instance_id=iid)
+        self._alert(f"box {iid}: the {name} tunnel's port {detail['box_port']} {said}. Closed, and not "
+                    f"opened on this box again while a task there asks, until the dispatcher restarts "
+                    f"(job-services inv. 6a).")
+
+    def _record_tunnel(self, key: tuple, t: _Tunnel) -> None:
+        """Inv. 8: the pid file of a held tunnel. A file that cannot be written is logged, and the
+        next pass writes it again."""
+        try:
+            record = _tunnel_pid_record(t.proc.pid, tunnel_forward(t.box_port, t.home))
+            _write_private(t.pid_path, (json.dumps(record) + "\n").encode())
+        except OSError as e:
+            self.log("service_tunnel_unrecorded",
+                     json.dumps({"service": key[1], "why": e.strerror or str(e)}), instance_id=key[0])
+
+    def _open_tunnel(self, key: tuple, host: str, port: int, box_port: int, home: str) -> None:
+        iid, name = key
+        tdir = self._private_tunnel_dir()
+        err_path, pid_path = tdir / f"i{iid}.{name}.err", tdir / f"i{iid}.{name}.pid"
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                if err_path.is_symlink():
+                    err_path.unlink()
+            fd = os.open(err_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as err:
+                proc = self.popen(tunnel_cmd(host, port, box_port, home), stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=err, start_new_session=True)
+        except OSError as e:
+            self.log("service_tunnel_down",
+                     json.dumps({"service": name, "rc": None, "why": f"ssh could not start: {e}"}),
+                     instance_id=iid)
+            return
+        # Held FIRST and recorded NEXT, before any log: whatever happens after, this dispatcher can
+        # still close what it opened, and a restarted one can find it.
+        t = self._tunnels[key] = _Tunnel(proc, (host, port), box_port, home, err_path, pid_path)
+        self._record_tunnel(key, t)
+        self.log("service_tunnel_open", json.dumps({"service": name, "box_port": box_port,
+                                                    "home": home, "endpoint": f"{host}:{port}"}),
+                 instance_id=iid)
+
+    def _close_tunnel(self, key: tuple, why: str) -> None:
+        t = self._tunnels.pop(key)
+        _stop_tunnel_process(t.proc)
+        with contextlib.suppress(OSError):
+            t.pid_path.unlink()
+        self.log("service_tunnel_closed", json.dumps({"service": key[1], "why": why}),
+                 instance_id=key[0])
+
+    def _sweep_tunnel_pids(self) -> None:
+        """Inv. 8: end every tunnel an earlier dispatcher left behind, so this one never holds two
+        for one box and port. Only a process that started when the file says and whose command
+        line is that tunnel's is ever signalled."""
+        tdir = self._tunnel_dir()
+        if not tdir.is_dir():
+            return
+        for tmp in tdir.glob(".i*.pid.*"):                         # a write cut short (`_write_private`)
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+        for pid_path in tdir.glob("i*.pid"):
+            try:
+                rec = json.loads(pid_path.read_text())
+                pid, start, forward = rec["pid"], rec["start"], rec["forward"]
+                ok = (type(pid) is int and pid > 1 and type(start) is int
+                      and isinstance(forward, str))
+            except (OSError, ValueError, KeyError, TypeError):
+                ok = False
+            st = _proc_stat(pid) if ok else None
+            if st is not None and st[1] == start:
+                try:
+                    argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+                except OSError:
+                    argv = []
+                if _is_tunnel_cmdline([a.decode(errors="replace") for a in argv if a], forward):
+                    _end_recorded_tunnel(pid, start)
+            with contextlib.suppress(OSError):
+                pid_path.unlink()
+
+    def _remove_unasked_service_files(self, asked: dict) -> None:
+        """Inv. 10: a service's files leave a box with the last open task there that asks."""
+        rows = self.conn.execute("SELECT key FROM settings WHERE key LIKE 'service_files_i%'").fetchall()
+        for r in rows:
+            m = re.fullmatch(r"service_files_i(-?\d+)", r["key"])
+            if m is None:
+                continue
+            iid = int(m.group(1))
+            try:
+                self._remove_unasked_on(iid, asked.get(iid, set()))
+            except Exception as e:  # noqa: BLE001 - one box's fault must not starve the others
+                self.log("service_tunnels_failed", f"removing files: {type(e).__name__}: {e}",
+                         instance_id=iid)
+
+    def _remove_unasked_on(self, iid: int, asked: set) -> None:
+        inst = self.conn.execute("SELECT * FROM instances WHERE id=?", (iid,)).fetchone()
+        if inst is None or inst["state"] == "destroyed" or self._lost_for_good(inst):
+            self._write_service_files_row(iid, [])               # the box is gone, and its files
+            return
+        if inst["state"] not in SERVICE_BOX_STATES:
+            return                         # not reachable now (unreachable, lost): kept for later
+        names = self._service_files_row(iid)
+        stale = [n for n in names if n not in asked]
+        if not stale:
+            return
+        host, port = endpoint_for(dict(inst), self.tracker, self.vastai_run)
+        keep = [n for n in names if n not in stale]
+        for name in stale:
+            if not registry_db.SERVICE_NAME_RE.fullmatch(name):
+                continue                                          # never ours: drop it
+            out = ssh_run(host, port, service_remove_cmd(name), run=self.run)
+            if out.returncode == 0:
+                self.log("service_files_removed", json.dumps({"service": name}), instance_id=iid)
+            else:
+                keep.append(name)                                 # the next pass tries again
+        self._write_service_files_row(iid, keep)
+
+    @staticmethod
+    def _lost_for_good(inst) -> bool:
+        """Inv. 10: a `lost` box is most often adopted back `live` within minutes, so its files' row
+        is kept; one lost for `SERVICE_LOST_FORGET_S` is taken for gone."""
+        if inst["state"] != "lost" or not inst["destroyed_at"]:
+            return False
+        try:
+            since = datetime.datetime.strptime(inst["destroyed_at"], "%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError):
+            return False
+        age = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - since
+        return age.total_seconds() > SERVICE_LOST_FORGET_S
+
     def _ship(self, task: dict, inst: dict) -> bool:
         """One task delivered start to finish, SERIALLY — prepare, push, apply.
 
@@ -8308,6 +8987,21 @@ class Dispatcher:
         (n_prior_ships,) = self.conn.execute(
             "SELECT COUNT(*) FROM events WHERE task_id=? AND event='ship'", (task["id"],)).fetchone()
         entry = entrypoints.resolve(task)  # manifest contract if present, else the named table
+        # job-services inv. 3: a service the task asks for and cannot be given fails it here, before
+        # any build — the fault is the site's settings, and another box would fail the same way.
+        try:
+            services = self._service_payloads(task, inst) if inst is not None else []
+        except ServiceUnavailable as e:
+            reason = (f"a service this task asks for cannot be given to it: {e}. Fix the "
+                      f"coordinator's `services` setting (job-services spec) and queue it again.")
+            self._alert("%s/%s: %s" % (task["grp"], task["name"], reason))
+            registry_db.transition(self.conn, task["id"], "task_failed", "task_failed", reason)
+            return None
+        # job-services inv. 5/10: recorded BEFORE any byte is sent, so files a ship wrote are removed
+        # even when its outcome is never applied (a restart mid-ship, the already-delivered path);
+        # removing files that were never written is harmless.
+        for svc in services:
+            self._note_service_files(inst["id"], svc["name"])
         staging = EXPERIMENTS_ROOT / ".ship" / task["id"]
         staging.mkdir(parents=True, exist_ok=True)
         code_tar, code_format = self._build_code_tar(task)
@@ -8368,6 +9062,9 @@ class Dispatcher:
             "blob_id": code_ref,
             "blob_path": str(artifact_store.blob_path(EXPERIMENTS_ROOT, code_ref)) if code_ref else None,
             "blob_dir": f"~/spool/{bundle.BLOBS_DIRNAME}/",
+            # job-services inv. 4: each service's files as ONE tar for ssh's stdin. Memory only —
+            # never staged, never logged.
+            "services": services,
         }
 
     def _ship_io(self, plan: dict, host: str, port: int) -> dict:
@@ -8458,6 +9155,19 @@ class Dispatcher:
             if out.returncode != 0:
                 return {"ok": False, "already": False, "ops": ops,
                         "fail": f"apt install failed for {pkgs}: {out.stderr[-300:]}"}
+        # job-services inv. 4/5: the files of each service the task asks for, over ssh's STDIN.
+        written: list = []
+        for svc in plan.get("services") or []:
+            out = ssh_run_input(host, port, service_write_cmd(svc["name"]), svc["tar"], run=self.run)
+            # Reachability, not success: only ssh's own failure (255) or a timeout (124) says the box
+            # could not be reached; a fault on the box (a full disk, say) fails the ship all the same.
+            ops.append((out.returncode not in (124, 255), True))
+            if out.returncode != 0:
+                err = " ".join((out.stderr or "").split())[-300:]
+                return {"ok": False, "already": False, "ops": ops, "services_written": written,
+                        "fail": f"service {svc['name']}: its files could not be written to the box "
+                                f"(rc {out.returncode}){': ' + err if err else ''}"}
+            written.append((svc["name"], svc["files"]))
         ok, why = False, ""
         for attempt in range(3):
             ok, why = rsync_push_detail(host, port, [plan["bundle_path"]], plan["remote_dir"],
@@ -8470,11 +9180,11 @@ class Dispatcher:
             # ⚠ CARRY THE REASON. The bare version of this string said only "rsync push failed after
             # 3 attempts", which reads as a link problem and is why a full disk cost 34 minutes and
             # six stranded tasks before anyone ran `df` (see `rsync_push_detail`).
-            return {"ok": False, "already": False, "ops": ops,
+            return {"ok": False, "already": False, "ops": ops, "services_written": written,
                     "fail": f"rsync push failed after 3 attempts to {host}:{port} — {why}"}
         ok2 = rsync_push(host, port, [plan["ready_path"]], plan["remote_dir"], run=self.run)
         ops.append((ok2, False))   # historically recorded WITHOUT an ssh_fallback log
-        return {"ok": ok2, "already": False, "ops": ops, "fail": None}
+        return {"ok": ok2, "already": False, "ops": ops, "fail": None, "services_written": written}
 
     def _apply_ship_io(self, task: dict, inst: dict, res: dict) -> None:
         """SERIAL apply of one ship's I/O outcome: replay reachability into the tracker in the
@@ -8485,6 +9195,9 @@ class Dispatcher:
             if switched and announce:
                 self.log("ssh_fallback", f"switched instance {inst['id']} to direct endpoint",
                           instance_id=inst["id"])
+        for name, files in res.get("services_written") or []:      # job-services inv. 5
+            self.log("service_files_written", json.dumps({"service": name, "files": files}),
+                     task_id=task["id"], instance_id=inst["id"])
         if res["fail"]:
             self.log("ship_failed", res["fail"], task_id=task["id"], instance_id=inst["id"])
 

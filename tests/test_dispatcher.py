@@ -5624,8 +5624,8 @@ class TestThePollCycleTimesItself:
         assert ev is not None, "a poll cycle left no timing record"
         assert set(ev["phases"]) == {
             "reconcile", "ssh_config", "heartbeats", "provision", "ingest", "cancels", "drain",
-            "over_capacity", "capacity_push", "probe", "box_requests", "measure", "book_cost", "place", "consolidate", "ship",
-            "teardown", "gc_staging", "gc_temps", "gc_snapshots", "worker_refresh"}, ev["phases"]
+            "over_capacity", "capacity_push", "probe", "box_requests", "measure", "book_cost", "place", "consolidate",
+            "service_tunnels", "ship", "teardown", "gc_staging", "gc_temps", "gc_snapshots", "worker_refresh"}, ev["phases"]
         assert ev["total_sec"] == pytest.approx(sum(ev["phases"].values()), abs=0.5)
 
     def test_a_slow_cycle_is_flagged_against_the_heartbeat_threshold(self, tmp_path, monkeypatch):

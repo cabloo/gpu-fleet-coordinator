@@ -287,7 +287,9 @@ def make_snapshot(root, *, allow_non_git: bool = True) -> SnapshotResult
   `SCHEMA_VERSION` bumped with a forward migration (invariant 9).
 - `docs/specs/task-dispatcher.spec.md` — the ship/complete lifecycle; its `task.json` schema is
   unchanged (values are now contract-sourced). Invariant 13 (no secrets on the box) preserved —
-  `job.json` never carries secrets and `env` stays `{}`.
+  `job.json` never carries secrets, and `env` carries none. A `job` section may name home
+  services (`"services": ["<name>"]`, `job-services.spec.md`), which is how a task asks for a
+  service's files and, on a rented box, a tunnel to it.
 - `docs/specs/task-bundle.spec.md` — unchanged; the bundle packs whatever `code.tar.gz` it's
   handed, `job.json` included, and the box ignores it.
 

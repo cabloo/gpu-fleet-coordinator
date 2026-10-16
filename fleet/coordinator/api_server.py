@@ -208,7 +208,9 @@ class Api:
                 # dispatcher inv. 4i-1: `resource_hint_json` is an opaque string to the allowlist
                 # above, so a `force_box` hint survives the transport untouched — and is re-checked
                 # HERE against the registry, because the client's own check is not a trust boundary.
-                hint_err = registry_db.force_box_error(conn, t.get("resource_hint_json"))
+                hint_err = (registry_db.force_box_error(conn, t.get("resource_hint_json"))
+                            # job-services spec inv. 2: the names, against THIS registry's setting
+                            or registry_db.services_error(conn, t.get("resource_hint_json")))
                 if hint_err is not None:
                     raise ApiError(422, "validation", hint_err)
                 if not env.get("force"):

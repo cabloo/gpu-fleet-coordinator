@@ -36,7 +36,7 @@ _RECEIVER_FULL = ('rsync: [receiver] write failed on "/data/g/T/ckpt_latest.pt":
                   "rsync error: error in file IO (code 11) at receiver.c(380) [receiver=3.2.7]")
 PHASES = {"reconcile", "ssh_config", "heartbeats", "provision", "ingest", "cancels", "drain",
           "over_capacity", "capacity_push", "probe", "box_requests", "measure", "book_cost",
-          "place", "consolidate", "ship", "teardown", "gc_staging", "gc_temps", "gc_snapshots",
+          "place", "consolidate", "service_tunnels", "ship", "teardown", "gc_staging", "gc_temps", "gc_snapshots",
           "worker_refresh"}
 
 

@@ -198,7 +198,9 @@ runnable on a bare `pytorch/pytorch` image.
    still enforced). The dispatcher signs iff `settings["bundle_sign"]` and a private key
    (`DISPATCHER_BUNDLE_SIGN_KEY`) are both present.
 5. **No secret on the box.** Only the ed25519 **public** key is ever shipped. The private key
-   never leaves home; `task.json`'s `env` stays `{}` (unchanged). (task-dispatcher invariant 13.)
+   never leaves home. `task.json`'s `env` carries no secret: its values are flags and, for a
+   task that asks for a service, the directory of that service's files
+   (`FLEET_SERVICE_<NAME>`, job-services inv. 11). (task-dispatcher invariant 13.)
 6. **Compilation is default-on, ABI-matched, and never a silent downgrade — but a compile ERROR
    fails fast, it does not fall back.** The dispatcher compiles iff `settings["bundle_compile"]`
    (default True). The default `backend="local"` compiles with an interpreter whose version matches

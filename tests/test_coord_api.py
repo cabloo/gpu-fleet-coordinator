@@ -343,6 +343,44 @@ def test_an_ordinary_hint_is_not_inspected(api):
     assert status == 201 and len(api.tasks()) == 1
 
 
+def _define_checker(api):
+    """A complete `services` row (job-services spec), as the coordinator's registry holds it."""
+    conn = registry_db.connect(api.db)
+    conn.execute("INSERT INTO settings(key, value) VALUES ('services', ?)", (json.dumps({
+        "checker": {"rented": {"tunnel": {"home": "172.17.0.1:18120", "box_port": 18100}},
+                    "owned": {}}}),))
+    conn.commit()
+    conn.close()
+
+
+def test_a_services_hint_naming_a_defined_service_is_stored(api):
+    api.store_blob()
+    _define_checker(api)
+    env = json.loads(api.envelope())
+    env["tasks"][0]["resource_hint_json"] = json.dumps({"services": ["checker"]})
+    status, _ = api.call("POST", "/v1/submissions", body=json.dumps(env).encode())
+    assert status == 201
+    conn = registry_db.connect(api.db)
+    (stored,) = conn.execute("SELECT resource_hint_json FROM tasks").fetchone()
+    assert json.loads(stored) == {"services": ["checker"]}
+
+
+@pytest.mark.parametrize("services,why", [
+    (["other"], "no service 'other'"),
+    (["checker", "checker"], "twice"),
+    ("checker", "list of service names"),
+])
+def test_a_bad_services_hint_is_refused_SERVER_side_and_writes_nothing(api, services, why):
+    """job-services inv. 2: the coordinator checks the names against ITS `services` setting."""
+    api.store_blob()
+    _define_checker(api)
+    env = json.loads(api.envelope(n=2))
+    env["tasks"][1]["resource_hint_json"] = json.dumps({"services": services})
+    status, body = api.call("POST", "/v1/submissions", body=json.dumps(env).encode())
+    assert status == 422 and body["code"] == "validation" and why in body["error"], body
+    assert api.tasks() == []
+
+
 def test_re_using_a_LANE_name_is_a_409_not_a_500(api):
     """`UNIQUE(grp, name)` is a client error. It first surfaced as a 500, which would have read as
     'the coordinator is broken' for what is simply a name already in use."""
