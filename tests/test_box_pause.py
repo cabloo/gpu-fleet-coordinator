@@ -569,6 +569,143 @@ class TestMeasuredHeadroom:
         assert disp._headroom_fits(self._task(2, 99.0), inst, self.S, 1000.0)
 
 
+class TestHeadroomCountsAStartNoSampleHasSeen:
+    """Inv. 23c: a running task's declared VRAM stays pending until the box has a sample taken at
+    least `resource_settle_min` after the task started.
+
+    THE INCIDENT (2026-10-21): an owned 8 GB card with no capacity schedule, so measured headroom was
+    its only VRAM gate. One reading of the empty card (0.0 of 8.0 GB); A (6.5 GB declared) claimed 4 s
+    later, leaving 0.5 GB, which refused the rest. A started 44 s after its claim, left the pending
+    sum, and B was claimed 3 s later against the SAME reading; C and D followed their predecessors'
+    starts the same way. Four tasks declaring 6.0-6.5 GB on one 8 GB card inside three minutes, and A
+    died out of GPU memory. The next reading showed 6.3 GB used."""
+
+    S = {**disp.DEFAULT_SETTINGS}
+    CARD = {"cores": 20, "load1": 0.3, "ram_avail_gb": 28.0, "vram_total_gb": 8.0}
+    IID = -2
+
+    # ---- pure: which running occupants a sample is too early to contain
+    def _hr_vram(self, ran_min, sample_age_min, settings=None):
+        now = 1000.0
+        occ = {"id": "a", "state": "running", "running_minutes_ago": ran_min,
+               "cores": 1.0, "ram_gb": 2.0, "vram_gb": 6.5}
+        inst = {"measured": {**self.CARD, "vram_used_gb": 0.0, "at": now - sample_age_min * 60},
+                "resource_cap": None, "occupants": [occ]}
+        return disp.box_headroom(inst, settings or self.S, now)
+
+    @pytest.mark.parametrize("ran_min,sample_age_min,counted", [
+        (1.0, 2.0, True),      # the sample was taken before the start
+        (0.0, 0.0, True),      # ... or at it
+        (4.0, 0.0, True),      # 4 min after the start: inside the 5-min settle
+        (5.0, 0.1, True),      # 4.9 min after
+        (5.5, 0.4, False),     # 5.1 min after: the sample can hold the task
+        (60.0, 3.0, False),    # long-running work is judged on the card alone, as before
+        (None, 3.0, True),     # no start time: not known to be in the sample
+    ])
+    def test_a_running_task_counts_until_a_sample_settle_after_its_start(
+            self, ran_min, sample_age_min, counted):
+        hr = self._hr_vram(ran_min, sample_age_min)
+        assert hr["vram_gb"] == pytest.approx(8.0 - 0.0 - (6.5 if counted else 0.0) - 1.0)
+
+    def test_only_the_vram_axis_changes(self):
+        """Cores and RAM keep the old rule: a running task is inside the sample."""
+        fresh, old = self._hr_vram(0.0, 0.0), self._hr_vram(60.0, 3.0)
+        assert (fresh["cores"], fresh["ram_gb"]) == (old["cores"], old["ram_gb"])
+        assert fresh["cores"] == pytest.approx(20 - 0.3 - 1.0)
+
+    def test_the_settle_is_the_setting(self):
+        none = {**self.S, "resource_settle_min": 0}
+        assert self._hr_vram(4.0, 0.0, none)["vram_gb"] == pytest.approx(8.0 - 1.0)
+        assert self._hr_vram(1.0, 2.0, none)["vram_gb"] == pytest.approx(8.0 - 6.5 - 1.0)
+        assert self.S["resource_settle_min"] == 5
+
+    # ---- through the real dispatcher: the occupant view, `place()`, the registry's start stamp
+    def _dispatcher(self, tmp_path, sample_ago_s, vram_used):
+        """The 8 GB card with no capacity schedule, one sample taken `sample_ago_s` ago."""
+        d = _dispatcher(tmp_path)
+        d._offers = lambda: []
+        d.conn.execute(
+            "INSERT INTO instances(id, machine_id, label, created_at, state, dph_usd, gpu_name, "
+            "ssh_host, ssh_port, slots_total, hard_cap_at, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (self.IID, None, "gpudesktop", reg.now_iso(), "live", 0.0, "Test GPU 8GB",
+             "192.168.0.12", 22, 6, FAR_CAP, "owned"))
+        d.conn.commit()
+        d._capacity_slots = lambda inst, now=None: None      # no schedule: headroom is the gate
+        d._capacity_budget = lambda inst, now=None: None
+        self._sample(d, sample_ago_s, vram_used)
+        return d
+
+    def _sample(self, d, ago_s, vram_used):
+        d._box_res[self.IID] = {**self.CARD, "vram_used_gb": vram_used, "at": time.time() - ago_s}
+
+    @staticmethod
+    def _started_ago(d, tid, ago_s):
+        d.conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (_iso_ago(ago_s / 60), tid))
+        d.conn.commit()
+
+    def _running(self, d, tid, gb, started_ago_s):
+        """A task already on the card, its `running` stamp `started_ago_s` ago."""
+        _task(d.conn, tid, self.IID, "running", hint={"vram_per_lane_gb": gb, "cores_per_lane": 1})
+        self._started_ago(d, tid, started_ago_s)
+
+    @staticmethod
+    def _queue(d, *tids_gb):
+        for n, (tid, gb) in enumerate(tids_gb):       # oldest first, so placed in this order
+            _task(d.conn, tid, None, "queued", updated_ago_min=len(tids_gb) - n,
+                  hint={"vram_per_lane_gb": gb, "cores_per_lane": 1})
+
+    @staticmethod
+    def _states(d, *tids):
+        return [reg.get_task(d.conn, t)["state"] for t in tids]
+
+    def _headroom(self, d):
+        (view,) = [i for i in d._instances_view() if i["id"] == self.IID]
+        return disp.box_headroom(view, d.settings, time.time())
+
+    def test_THE_INCIDENT_one_reading_of_an_empty_card_admits_one_task_not_four(self, tmp_path):
+        d = self._dispatcher(tmp_path, sample_ago_s=4, vram_used=0.0)
+        self._queue(d, ("A", 6.5), ("B", 6.0), ("C", 6.0), ("D", 6.0))
+        d._place_queue()
+        assert self._states(d, "A", "B", "C", "D") == ["claimed", "queued", "queued", "queued"]
+        # A starts 44 s after its claim (the worker's `start`, recorded by the dispatcher's CAS).
+        # The card's only reading is still the empty one, now 48 s old.
+        assert reg.transition(d.conn, "A", "running", "start", "worker reported start").ok
+        self._sample(d, 48, 0.0)
+        for _ in range(3):
+            d._place_queue()
+        assert self._states(d, "A", "B", "C", "D") == ["running", "queued", "queued", "queued"]
+        # Four minutes on, still no reading since A started: it says nothing about A.
+        self._started_ago(d, "A", 4 * 60)
+        self._sample(d, 4 * 60 + 48, 0.0)
+        d._place_queue()
+        assert self._states(d, "B", "C", "D") == ["queued", "queued", "queued"]
+        assert self._headroom(d)["vram_gb"] == pytest.approx(8.0 - 0.0 - 6.5 - 1.0)
+
+    def test_a_reading_inside_the_settle_still_counts_the_start(self, tmp_path):
+        """2 min after A's start the card reads 6.3 GB, and its allocation may still be climbing:
+        A's declaration still counts, so the box is judged as if the rest were on its way. This is
+        the fix's price: a 0.5 GB task that fits the reading waits for the next one."""
+        d = self._dispatcher(tmp_path, sample_ago_s=0, vram_used=6.3)
+        self._running(d, "A", 6.5, started_ago_s=2 * 60)
+        self._queue(d, ("B", 6.0), ("S", 0.5))
+        d._place_queue()
+        assert self._states(d, "B", "S") == ["queued", "queued"]
+        assert self._headroom(d)["vram_gb"] == pytest.approx(8.0 - 6.3 - 6.5 - 1.0)
+
+    @pytest.mark.parametrize("used,b,s", [(6.3, "queued", "claimed"), (0.8, "claimed", "queued")])
+    def test_CONTROL_a_reading_after_the_settle_is_judged_as_before(self, tmp_path, used, b, s):
+        """A reading taken 5.5 min after A's start: A counts only through what the card reports,
+        so headroom is card - used - reserve, exactly as before. 6.3 GB (the incident's next
+        reading) refuses B and still admits a 0.5 GB task, which a double charge of A would refuse;
+        a card A left mostly free admits B, and S no longer fits beside it."""
+        d = self._dispatcher(tmp_path, sample_ago_s=30, vram_used=used)
+        self._running(d, "A", 6.5, started_ago_s=6 * 60)
+        self._queue(d, ("B", 6.0), ("S", 0.5))
+        assert self._headroom(d)["vram_gb"] == pytest.approx(8.0 - used - 1.0)
+        d._place_queue()
+        assert self._states(d, "B", "S") == [b, s]
+
+
 class TestPreemptionSeesTheBudget:
     """Inv. 17a': a task blocked by the 18a BUDGET (not by slot count) must still be able to preempt.
     Regression: `shortfall = slots - free_slots` reads 0 on a box with a free slot, so preemption

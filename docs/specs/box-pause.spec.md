@@ -277,8 +277,10 @@ Same machinery as pause/drain, generalized from "0 or full" to a scheduled cap.
        working the fleet's headroom genuinely shrinks, which no slot count can express. `pending` is
        the declared footprint of occupants a sample cannot yet see (`claimed`/`shipped`/`reserved`,
        incl. same-pass reservations); a `running` occupant is already inside the sample and must not
-       be double-charged. Reserves (`headroom_cpu_reserve` 1.0 core, `headroom_ram_reserve_gb` 2.0,
-       `headroom_vram_reserve_gb` 1.0) keep a poll from scheduling a box to its exact edge.
+       be double-charged, except that its declared VRAM stays pending until a sample taken
+       `resource_settle_min` (5) after its start exists. Reserves (`headroom_cpu_reserve` 1.0 core,
+       `headroom_ram_reserve_gb` 2.0, `headroom_vram_reserve_gb` 1.0) keep a poll from scheduling a
+       box to its exact edge.
     d. *Gate.* `_fits_now` admits only if headroom holds the task's declared footprint on every
        measured axis (RAM via `ram_per_lane_gb`, the axis hints almost never declare). **Abstains
        rather than blocks on absent data**: no measurement, a sample older than

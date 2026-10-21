@@ -597,6 +597,9 @@ DEFAULT_SETTINGS = {
     # consolidation run on measured VRAM instead of the static `vram_per_lane_gb` hint. Best-effort,
     # in-memory (a restart just re-measures within a cadence).
     "resource_measure_every_min": 5,
+    # Box-pause inv. 23c: a running task's declared VRAM counts against its box's measured headroom
+    # until a sample taken at least this long after its start (`_pending_footprint`). One cadence.
+    "resource_settle_min": 5,
     # Invariant 31d: how often each OWNED box gets a reading-only probe between the full ones, so a
     # status system sees current numbers. 0 = off. Read live, so turning it on needs no restart.
     "box_reading_every_min": 0,
@@ -1158,16 +1161,39 @@ def ntfy_post(topic: str, title: str, message: str, *, tags: str = "", priority:
         return False, f"{type(e).__name__}: {e}"[:300]
 
 
-def _pending_footprint(inst: dict, settings: dict) -> tuple[float, float, float]:
+def _pending_footprint(inst: dict, settings: dict,
+                       now: float | None = None) -> tuple[float, float, float]:
     """Declared `(cores, ram_gb, vram_gb)` of occupants a measurement CANNOT yet see — those
     `claimed`/`shipped`/`reserved`, plus anything placed earlier in this same poll. A `running`
-    occupant is already inside the sampled load/VRAM, so counting it again would double-charge."""
+    occupant is already inside the sampled load/VRAM, so counting it again would double-charge —
+    except on the VRAM axis while the sample is too early to hold it (below).
+
+    ⛔ "Running" says the task left `claimed`, not that any sample has seen it. Samples come every
+    `resource_measure_every_min` and are trusted for `headroom_max_stale_min`, so one reading of an
+    EMPTY card can outlive several starts. Measured 2026-10-21 on an owned 8 GB card with no capacity
+    schedule: one reading of 0.0 GB used admitted four tasks declaring 6.0-6.5 GB each inside three
+    minutes, each a few seconds after its predecessor's start took it out of this sum, and the first
+    died out of GPU memory; the next reading showed 6.3 GB used. So a running task's declared VRAM
+    stays pending until the box's sample was taken at least `resource_settle_min` after the start:
+    started within (sample age + settle) of `now`. The start is the registry's `running` stamp,
+    which is never earlier than the box's own start, and the sample's `at` is stamped before its
+    ssh, so both errors lean towards counting. A running occupant with no start time is not known
+    to be in the sample, so it counts (the occupant view always gives one; a hand-built occupant may not)."""
     cores = ram = vram = 0.0
+    m = inst.get("measured") or {}
+    now = time.time() if now is None else now
+    settle_s = settings.get("resource_settle_min", 5) * 60
+    sample_age_s = now - m["at"] if m.get("at") is not None else None
     for o in inst.get("occupants", []):
-        if o.get("state") in ("claimed", "shipped", "reserved"):
+        state = o.get("state")
+        if state in ("claimed", "shipped", "reserved"):
             cores += o.get("cores", 0.0)
             ram += o.get("ram_gb", 0.0)
             vram += o.get("vram_gb", 0.0)
+        elif state == "running" and sample_age_s is not None:
+            ran_min = o.get("running_minutes_ago")
+            if ran_min is None or ran_min * 60 < sample_age_s + settle_s:
+                vram += o.get("vram_gb", 0.0)
     return cores, ram, vram
 
 
@@ -1235,7 +1261,7 @@ def box_headroom(inst: dict, settings: dict, now: float) -> dict | None:
     if now - m.get("at", 0.0) > stale_s:
         return None  # a stale sample is not evidence; abstain rather than act on old numbers
     caps = inst.get("resource_cap") or {}
-    pend_c, pend_r, pend_v = _pending_footprint(inst, settings)
+    pend_c, pend_r, pend_v = _pending_footprint(inst, settings, now)
 
     # Invariant 28: container-true denominators when the cgroup is measured, host pair otherwise.
     cpu_total, cpu_used = _cpu_pair(m)

@@ -248,6 +248,8 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
     are measured (invariant 22), else slot-count governs.
   - `resource_measure_every_min = 5` (invariant 22) — how often to sample each live box's real GPU
     memory so packing/consolidation run on measured VRAM, not the static `vram_per_lane_gb` hint.
+  - `resource_settle_min = 5` (box-pause 23c) — a running task's declared VRAM counts against
+    measured headroom until a sample taken this long after its start.
   - `box_reading_every_min = 0` (invariant 31d) — how often each OWNED box gets a reading-only
     probe between the full ones, so a status system sees current numbers. 0 = off. Read live.
   **Settings migrations.** Defaults are written only for *missing* keys at first start, so lowering
