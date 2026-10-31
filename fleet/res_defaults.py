@@ -61,7 +61,13 @@ VRAM IS NETTED AGAINST THE BOX'S IDLE READING BEFORE IT IS LEARNED (invariant 26
 `vram_used_gb` is the WHOLE CARD — display, owner, co-tenant — so dividing it by `running` charged
 every lane for memory the fleet never allocated (5.94 GB per lane learned for a CPU-only group).
 
-KNOWN BIAS, stated rather than corrected: `mem_used_gb`/`cpu_used_cores` are CONTAINER totals, so
+RAM IS THE CONTAINER'S ANONYMOUS MEMORY, NOT `memory.current` (invariant 26o, `lane_ram_gb`).
+`mem_used_gb` counts page cache, which the kernel reclaims instead of OOM-killing. Invariant 28
+already refuses to charge it to the headroom gate, but the learner charged it to every lane. A box
+whose cgroup kept 11 GB with no task open (anon 0.0) taught its group 16 GB a lane (the ceiling),
+and that held the group's next task off the same box, which had 15.6 GB to give.
+
+KNOWN BIAS, stated rather than corrected: `mem_anon_gb`/`cpu_used_cores` are CONTAINER totals, so
 dividing by `running` charges each lane a share of fixed per-box overhead. At low occupancy that
 inflates the per-lane figure. The bias is conservative (it over-reserves, never under-reserves) and
 shrinks as boxes pack deeper, so it is left in. A slope fit across occupancies would remove it and is
@@ -157,6 +163,21 @@ def _homogeneous(vals: list[float], floor: float) -> bool:
         return True
     med = calibration.percentile(s, 0.50) or 0.0
     return med > 0 and p90 <= HOMOGENEITY_RATIO * med
+
+
+def lane_ram_gb(payload: dict):
+    """Pure (invariant 26o): the RAM a `box_measured` payload charges to its running lanes.
+
+    `mem_anon_gb` when the box reports it, else `mem_used_gb`, else None. `mem_used_gb` is the
+    cgroup's `memory.current`, which counts PAGE CACHE: the kernel reclaims cache under pressure
+    instead of OOM-killing, so charging it to a lane is wrong rather than conservative. That is
+    invariant 28's reason for gating headroom on anon, and the learner reads the same figure the gate
+    does. With no anon reading the old figure stands; it can only over-charge.
+
+    Shared memory (tmpfs, `/dev/shm`) is not anon, so a lane that holds a lot of it is under-learned.
+    Its declaration still stands as the lower bound (26k), and headroom (23) still measures the box."""
+    anon = payload.get("mem_anon_gb")
+    return anon if anon is not None else payload.get("mem_used_gb")
 
 
 def net_idle_vram(samples) -> list:

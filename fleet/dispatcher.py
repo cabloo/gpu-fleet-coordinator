@@ -8060,10 +8060,11 @@ class Dispatcher:
             except (TypeError, ValueError):
                 continue
             samples.append((box, at, p.get("ep"), p.get("grp"), p.get("running"), p.get("open"),
-                            p.get("cpu_used_cores"), p.get("vram_used_gb"), p.get("mem_used_gb")))
+                            p.get("cpu_used_cores"), p.get("vram_used_gb"),
+                            res_defaults.lane_ram_gb(p)))
         # Invariant 26n: `vram_used_gb` is the WHOLE CARD. A lane is charged only for what the card
         # holds above its box's last idle reading — the display, the owner's own work and a
-        # co-tenant are not the fleet's.
+        # co-tenant are not the fleet's. Invariant 26o: RAM is the anon reading, not page cache.
         rows = res_defaults.net_idle_vram(samples)
         learned = res_defaults.learn_lane_footprint(rows)
         prev = (cached or (None, {}))[1]

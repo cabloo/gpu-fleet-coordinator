@@ -2816,7 +2816,7 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
     h. *Never written back to the task row.* Like `_effective_est`, this is a scheduling-time
        correction; the row records the queue-time contract that `runq add` validated `--probe`
        bounds against.
-    i. *KNOWN BIAS, stated not corrected.* `cpu_used_cores`/`mem_used_gb` are CONTAINER totals, so
+    i. *KNOWN BIAS, stated not corrected.* `cpu_used_cores`/`mem_anon_gb` (o) are CONTAINER totals, so
        dividing by `running` charges each lane a share of fixed per-box overhead, inflating the
        per-lane figure at low occupancy. The bias is conservative (over-reserves, never under-) and
        shrinks as boxes pack deeper. A slope fit across occupancies would remove it.
@@ -2945,6 +2945,30 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
        declaration still stands as the lower bound (k), and headroom (23) still measures the whole
        card for every GPU user.
        Pinned by `tests/test_res_defaults.py` (`TestLearnerNetsTheIdleReading`).
+    o. *A LANE IS CHARGED ITS CONTAINER'S ANONYMOUS MEMORY, NOT ITS PAGE CACHE (2026-10-30).*
+       The learner divided `mem_used_gb`, the cgroup's `memory.current`, by `running`. That figure
+       counts page cache, which the kernel reclaims under pressure instead of OOM-killing, and
+       invariant 28 already refuses to charge cache to the headroom gate for that reason. The
+       learner and the gate disagreed about the same memory.
+       **The incident (2026-10-30).** `gpudesktop`'s cgroup held 11.1 GB with no task open (anon
+       0.0) and 17.6 GB with one lane running (anon 3.4). Its group learned 17.6 × 1.25, clamped
+       to the 16 GB ceiling. A k-raise made the group's next
+       task, declaring 8 GB, 16 at admission, and headroom on the idle box was 17.6 − 2.0 reserve =
+       15.6. The task held `box_target: waiting for box` for 7 hours, and requeued with its 8 GB
+       declaration it held again: no declaration can lower a learned figure (k).
+       *The rule* (`res_defaults.lane_ram_gb`, pure): `mem_anon_gb` when the payload carries it,
+       else `mem_used_gb` (the old figure; it can only over-charge), else nothing.
+       *Replayed on the 7 days to 2026-10-30* (7,492 samples, every one carrying anon): every group
+       of the two GPU entrypoints that cleared `LIVE_MIN_SAMPLE` learned 10.25–16.0 GB under the old
+       rule, almost all at the ceiling, and 2.5–4.25 under this one; the small CPU groups of one
+       ladder entrypoint fell from 0.89–2.12 to the 0.5 floor; the fleet-wide entry, which abstained
+       on most days, now learns 3.75–4.25.
+       *Known limit, stated.* Shared memory (tmpfs, `/dev/shm`) is not anon, so a lane that holds a
+       lot of it is under-learned. Its declaration still stands as the lower bound (k), and headroom
+       (23) still measures the whole box before every admission.
+       Pinned by `tests/test_res_defaults.py` (`TestLaneRamIsTheAnonReading`) and
+       `tests/test_vram_gates_gpu_users.py`
+       (`test_THE_INCIDENT_page_cache_is_not_charged_to_a_lane` and its control).
 
 27. **THE RENT FILTER ADMITS ON THE SAME AXES AS THE ADMISSION GATE (2026-07-31).**
     `slots_for_offer` / `lane_capacity` size an offer on VRAM, cores **and RAM**

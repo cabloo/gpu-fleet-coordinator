@@ -210,13 +210,17 @@ def _state(d, tid):
     return dict(d.conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
 
 
-def _measured(d, iid, minutes_ago, vram, running=0, open_n=None, grp=None, ep="smoke"):
-    """One `box_measured` event as the daemon writes it (the JSON tail is what the learner reads)."""
+def _measured(d, iid, minutes_ago, vram, running=0, open_n=None, grp=None, ep="smoke", ram=None,
+              anon=None):
+    """One `box_measured` event as the daemon writes it (the JSON tail is what the learner reads).
+    `anon` is left out of the payload unless given, as a box that cannot read it leaves it out."""
     t = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
     tail = {"v": 1, "cores": 32, "load1": float(running), "cpu_used_cores": float(running),
-            "mem_used_gb": 1.5 * running, "vram_total_gb": 12.0, "vram_used_gb": vram,
-            "running": running, "open": running if open_n is None else open_n,
+            "mem_used_gb": 1.5 * running if ram is None else ram, "vram_total_gb": 12.0,
+            "vram_used_gb": vram, "running": running, "open": running if open_n is None else open_n,
             "ep": ep if running else None, "grp": grp if running else None}
+    if anon is not None:
+        tail["mem_anon_gb"] = anon
     d.conn.execute("INSERT INTO events(t,task_id,instance_id,event,detail) VALUES (?,?,?,?,?)",
                    (t, None, iid, "box_measured", "load | " + json.dumps(tail, separators=(",", ":"))))
     d.conn.commit()
@@ -292,6 +296,38 @@ class TestThroughTheRealDispatcher:
         hint = d._effective_hint(_state(d, "NEXT"))
         assert hint["vram_per_lane_gb"] == 3.75                   # 3.0 x 1.25
         assert d._build_task_json(_state(d, "NEXT"))["env"] == {}
+        d._place_queue()
+        assert _state(d, "NEXT")["state"] == "queued"
+
+    @staticmethod
+    def _cache_heavy_box(tmp_path, anon):
+        """gpudesktop, 2026-10-30: the cgroup held 11.1 GB with no task open (anon 0.0) and 17.6 GB
+        with one lane running (anon 3.4); the box had 17.6 GB available, 15.6 after the reserve. The
+        group's next task declares 8 GB."""
+        d = _dispatcher(tmp_path)
+        _box(d, vram_used=0.5)
+        d._box_res[-1]["ram_avail_gb"] = 17.6
+        _measured(d, -1, minutes_ago=200, vram=0.5, ram=11.1, anon=None if anon is None else 0.0)
+        for i in range(20):
+            _measured(d, -1, minutes_ago=190 - 5 * i, vram=0.5, running=1, grp="cache_grp", ram=17.6,
+                      anon=anon)
+        _row(d, "NEXT", grp="cache_grp", hint={"cores_per_lane": 4, "ram_per_lane_gb": 8})
+        return d
+
+    def test_THE_INCIDENT_page_cache_is_not_charged_to_a_lane(self, tmp_path):
+        """26o on the real event log: memory.current / running learned the 16 GB ceiling, so the task
+        was admitted at 16 and held off an idle box with 15.6 GB to give. Anon learns 3.4 x 1.25."""
+        d = self._cache_heavy_box(tmp_path, anon=3.4)
+        assert d._learned_footprints()[("smoke", "cache_grp")]["ram_per_lane_gb"] == 4.25
+        assert d._effective_hint(_state(d, "NEXT"))["ram_per_lane_gb"] == 8   # the declaration stands
+        d._place_queue()
+        assert _state(d, "NEXT")["state"] == "claimed"
+
+    def test_CONTROL_a_box_without_an_anon_reading_keeps_the_old_charge(self, tmp_path):
+        """The control for the test above: its `claimed` was the RAM reading, not something else."""
+        d = self._cache_heavy_box(tmp_path, anon=None)
+        assert d._learned_footprints()[("smoke", "cache_grp")]["ram_per_lane_gb"] == res.CEIL_RAM
+        assert d._effective_hint(_state(d, "NEXT"))["ram_per_lane_gb"] == res.CEIL_RAM
         d._place_queue()
         assert _state(d, "NEXT")["state"] == "queued"
 

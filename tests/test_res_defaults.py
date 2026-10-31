@@ -471,3 +471,44 @@ class TestLearnerNetsTheIdleReading:
         learned = res.learn_lane_footprint(res.net_idle_vram(samples))
         assert learned[("e", "g")]["vram_per_lane_gb"] == 3.75                      # 3.0 x 1.25
         assert res.resolve_hint(learned, "e", "g", {})["vram_per_lane_gb"] == 3.75
+
+
+# ------------------- 26o: a lane is charged the container's anonymous memory, not its page cache
+
+class TestLaneRamIsTheAnonReading:
+    def test_anon_when_the_box_reports_it(self):
+        assert res.lane_ram_gb({"mem_used_gb": 17.6, "mem_anon_gb": 3.4}) == 3.4
+
+    def test_an_anon_reading_of_zero_is_a_reading(self):
+        assert res.lane_ram_gb({"mem_used_gb": 11.1, "mem_anon_gb": 0.0}) == 0.0
+
+    def test_without_anon_the_old_figure_stands(self):
+        assert res.lane_ram_gb({"mem_used_gb": 17.6}) == 17.6
+        assert res.lane_ram_gb({"mem_used_gb": 17.6, "mem_anon_gb": None}) == 17.6
+
+    def test_no_reading_teaches_nothing(self):
+        assert res.lane_ram_gb({}) is None
+
+    def test_THE_INCIDENT_page_cache_learned_the_ceiling(self):
+        """gpudesktop, 2026-10-30: 11.1 GB in the cgroup with no task open (anon 0.0), 17.6 GB with one
+        lane running, 3.4 GB of it anon. memory.current / running learned the 16 GB ceiling, above the
+        15.6 GB the idle box could give, so a task declaring 8 was held for 7 hours."""
+        payloads = [{"running": 0, "mem_used_gb": 11.1, "mem_anon_gb": 0.0}] + \
+                   [{"running": 1, "mem_used_gb": 17.6, "mem_anon_gb": 3.4}] * 20
+
+        def learned(ram_of):
+            return res.learn_lane_footprint([("e", "g", p["running"], 1.0, 0.0, ram_of(p))
+                                             for p in payloads])
+
+        assert learned(lambda p: p["mem_used_gb"])[("e", "g")]["ram_per_lane_gb"] == res.CEIL_RAM
+        after = learned(res.lane_ram_gb)
+        assert after[("e", "g")]["ram_per_lane_gb"] == 4.25                       # 3.4 x 1.25
+        assert res.resolve_hint(after, "e", "g", {"ram_per_lane_gb": 8})["ram_per_lane_gb"] == 8
+
+    def test_POSITIVE_CONTROL_real_anon_use_is_learned_and_still_raises_a_declaration(self):
+        """Two lanes holding 12 GB of anon between them: 6 GB a lane, raised to 7.5, over a 2 GB
+        declaration (26k: a lane's own measurement may raise what it declared)."""
+        reading = res.lane_ram_gb({"mem_used_gb": 20.0, "mem_anon_gb": 12.0})
+        learned = res.learn_lane_footprint([("e", "g", 2, 2.0, 0.0, reading)] * 20)
+        assert learned[("e", "g")]["ram_per_lane_gb"] == 7.5
+        assert res.resolve_hint(learned, "e", "g", {"ram_per_lane_gb": 2.0})["ram_per_lane_gb"] == 7.5
