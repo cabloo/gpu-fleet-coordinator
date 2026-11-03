@@ -268,7 +268,7 @@ def _manifest_est_and_hint(a: argparse.Namespace, manifest: job_manifest.JobMani
     # learned footprint per AXIS precisely so fields like these survive, which only matters once
     # they can exist. Unknown `resources` keys are already passed through by the manifest parser.
     for k in ("max_dph", "ram_per_lane_gb", "cpu_name_include", "box", "colocate",
-              "requires_gpu", "force_box"):
+              "requires_gpu", "force_box", "min_cuda", "min_compute_cap"):
         if k in res:
             hint[k] = res[k]
     # `--box` wins over a config-declared one: the flag is what an operator reaches for when they

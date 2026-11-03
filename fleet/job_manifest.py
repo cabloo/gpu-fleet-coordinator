@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -42,7 +43,7 @@ class JobManifest:
     resume_checkpoint: str = DEFAULT_RESUME_CHECKPOINT
     pip: list = field(default_factory=list)   # setup.pip — installed on the box before first run
     apt: list = field(default_factory=list)   # setup.apt — apt-installed over ssh at ship time
-    resources: dict = field(default_factory=dict)  # {slots?, vram_gb?, cores?, est_minutes?, requires_gpu?, box?, force_box?}
+    resources: dict = field(default_factory=dict)  # {slots?, vram_gb?, cores?, est_minutes?, requires_gpu?, box?, force_box?, min_cuda?, min_compute_cap?}
     #: `resume: {"none": "<reason>"}` — a DECLARED, durable opt-out for a job that genuinely cannot
     #: resume. Lives on the artifact, not on the queue-time invocation, so `check_submittable` and
     #: any auditor read the same bytes. See `check_submittable` for why that matters.
@@ -120,10 +121,17 @@ def parse(data: dict) -> JobManifest:
 
     resources = data.get("resources") or {}
     _require(isinstance(resources, dict), "resources must be an object")
-    for k in ("slots", "vram_gb", "cores", "est_minutes"):
+    # `min_cuda` / `min_compute_cap` (dispatcher invariant 4j): the driver's CUDA version and the card's
+    # architecture a rented box must reach. Numbers, so a stray bool is refused here too.
+    for k in ("slots", "vram_gb", "cores", "est_minutes", "min_cuda", "min_compute_cap"):
         if k in resources:
             _require(isinstance(resources[k], (int, float)) and not isinstance(resources[k], bool),
                      f"resources.{k} must be a number")
+    # ...and finite and positive: `json` reads `NaN`, and a NaN minimum compares False with everything.
+    for k in ("min_cuda", "min_compute_cap"):
+        if k in resources:
+            _require(math.isfinite(resources[k]) and resources[k] > 0,
+                     f"resources.{k} must be a positive finite number")
     # ⛔ `requires_gpu` (invariant 4h) IS A BOOL AND MUST BE VALIDATED SEPARATELY. Adding it to the
     # numeric loop above was exactly backwards — that loop EXCLUDES bools on purpose
     # (`not isinstance(..., bool)`, so a stray `True` cannot pass as a lane count), so every config

@@ -1657,6 +1657,45 @@ def gpu_allowed(offer: dict, resource_hint: dict | None) -> bool:
     return bool(str(offer.get("gpu_name") or "").strip())
 
 
+#: Invariant 4j: each per-task minimum a job may declare, and the Vast offer field it is read from.
+OFFER_MINIMUMS = {"min_cuda": "cuda_max_good", "min_compute_cap": "compute_cap"}
+
+
+def offer_minimums(resource_hint: dict | None) -> dict:
+    """Invariant 4j — the offer minimums THIS task declares, as {offer field: minimum}; {} for none.
+
+    WHY THIS EXISTS. A job's software can need more of a box than its memory: a torch build made for
+    CUDA 13 cannot use a card whose DRIVER supports only CUDA 12.x, and CUDA 13 no longer builds for
+    cards older than Turing. Neither shows in `gpu_name` or `gpu_ram_gb`. Measured: a large-model job
+    rented a card whose driver supported only CUDA 12.x; torch found no usable GPU, the job loaded the
+    model into host memory instead and was killed for memory within minutes. Vast publishes both
+    facts on every offer — `cuda_max_good` (the highest CUDA version the host's driver runs) and
+    `compute_cap` (the card's architecture, 860 for 8.6) — so placement can refuse such a box.
+
+    CONTRACT. `resource_hint.min_cuda` (e.g. 13.0) and `resource_hint.min_compute_cap` (e.g. 750),
+    positive finite numbers. Absent, a bool, a non-number, NaN, infinity or a value <= 0 => that
+    minimum is not set, so every existing task is unaffected. NaN must be excluded explicitly: every
+    comparison with it is False, so `offer < nan` would let every offer through."""
+    out = {}
+    for key, field in OFFER_MINIMUMS.items():
+        v = (resource_hint or {}).get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+            continue
+        out[field] = float(v)
+    return out
+
+
+def offer_meets_minimums(offer: dict, resource_hint: dict | None) -> bool:
+    """Invariant 4j, the RENT half: may THIS task rent THIS offer? FAIL-CLOSED, like
+    `cpu_name_allowed`: an offer that does not publish a field the task sets a minimum on is
+    refused, because the task would rather hold than be placed on a box that cannot run it."""
+    for field, minimum in offer_minimums(resource_hint).items():
+        v = offer.get(field)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < minimum:
+            return False
+    return True
+
+
 def cpu_name_patterns(resource_hint: dict | None) -> list:
     """The normalised `cpu_name_include` substrings, or [] when the task is not CPU-targeted."""
     inc = (resource_hint or {}).get("cpu_name_include")
@@ -1670,6 +1709,13 @@ def cpu_name_patterns(resource_hint: dict | None) -> list:
 def is_cpu_targeted(task: dict) -> bool:
     """Does this task name the CPU it must run on? See `_boardable` for what that restricts."""
     return bool(cpu_name_patterns(task.get("resource_hint")))
+
+
+def boards_only_its_own_rental(task: dict) -> bool:
+    """Is every box this task did not rent unverifiable for it? True for a CPU-targeted task (4f) and
+    for one that declares offer minimums (4j): the `instances` row records neither the CPU nor the
+    driver, so only the box rented FOR this task — vetted at rent time — is known to qualify."""
+    return is_cpu_targeted(task) or bool(offer_minimums(task.get("resource_hint")))
 
 
 def requires_gpu(resource_hint: dict | None) -> bool:
@@ -1975,7 +2021,10 @@ def _boardable(task: dict, instances: list) -> list:
     tgt = box_target(hint)
     if tgt is not None:                       # most specific wins; a box target implies its own CPU
         return [i for i in instances if _box_matches(i, tgt)]
-    if not is_cpu_targeted(task):
+    # 4j: a task with offer minimums boards only its own rental, as a CPU-targeted task does (4f). A
+    # box target above still wins: naming a machine asserts what it can run, and it is the only way
+    # such a task can use an owned box, whose driver the registry does not record.
+    if not boards_only_its_own_rental(task):
         return instances
     own = f"runq_{task['id']}"
     return [i for i in instances if i.get("label") == own]
@@ -2202,6 +2251,8 @@ def place(task: dict, instances: list, offers: list, queue: list, settings: dict
                 # 4h, the rent half of the GPU requirement whose pack half lives in `_boardable`.
                 # Guarding only one path is incident 1 of `_boardable`, replayed on a different axis.
                 and gpu_allowed(o, task.get("resource_hint"))
+                # 4j, the rent half; the pack half is `boards_only_its_own_rental` in `_boardable`.
+                and offer_meets_minimums(o, task.get("resource_hint"))
                 and slots_for_offer(o, task.get("resource_hint"), settings) >= min_slots]
 
     # 4g, the rent half of the same rule as the pack filter above: the member that rents is the
@@ -2686,6 +2737,9 @@ def eligible_offers(raw_offers: list, settings: dict) -> tuple[list, int]:
                        "cpu_ghz": o.get("cpu_ghz"),
                        "cpu_name": (o.get("cpu_name") or "").strip() or None,
                        "cpu_arch": o.get("cpu_arch"),
+                       # Invariant 4j: what a task's `min_cuda` / `min_compute_cap` are checked against.
+                       "cuda_max_good": o.get("cuda_max_good"),
+                       "compute_cap": o.get("compute_cap"),
                        "reliability": rel})
     return mapped, dropped
 

@@ -809,6 +809,36 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
       i9. *Fail-closed defaults.* Absent, `false`, or non-boolean `force_box` ⇒ the task is not
       forced and every pre-4i behaviour is bit-for-bit unchanged; `place()` reads nothing new for
       it.
+
+   j. **Invariant 4j — OFFER MINIMUMS: the driver and the card a job's software needs.** A job's
+      software can need more of a box than memory: a torch build made for CUDA 13 cannot use a card
+      whose driver supports only CUDA 12.x, and CUDA 13 no longer builds for cards older than
+      Turing. Neither shows in `gpu_name` or `gpu_ram_gb`. *Measured:* a large-model job rented a
+      card whose driver supported only CUDA 12.x; torch found no usable GPU, the job loaded the model
+      into host memory instead and was killed for memory within minutes. Vast publishes both facts on
+      every offer: `cuda_max_good` (the highest CUDA version the host's driver runs) and
+      `compute_cap` (the card's architecture, 860 for 8.6).
+
+      j1. *Contract.* `resource_hint.min_cuda` (e.g. `13.0`) and `resource_hint.min_compute_cap`
+      (e.g. `750`), positive finite numbers, forwarded by `runq` from a manifest job's `resources`;
+      the manifest refuses anything else, NaN and infinity included (a NaN minimum compares False with
+      every offer and would let all of them through). In a hint that did not come through the
+      manifest, an unusable value means that minimum is not set, and `place()` behaves bit-for-bit as
+      before.
+
+      j2. *Rent half.* `eligible_offers` carries both fields; `place()`'s rent filter keeps an offer
+      only if it reaches every minimum the task sets (`offer_meets_minimums`). FAIL-CLOSED, like 4f's
+      `cpu_name_allowed`: an offer that does not publish the field is refused, so a task with no
+      qualifying offer holds `no_offer` rather than renting a box it cannot use.
+
+      j3. *Pack half, deliberately reusing 4f.* The `instances` row records no driver, so a task with
+      minimums boards only the box rented for it (`runq_<task id>`, vetted at rent time) through the
+      same `_boardable` rule as a CPU-targeted task. That rule carries 4f's three regressions and
+      its known limitation (a targeted task that claims every slot can be gazumped and re-rent).
+      A box target (`resource_hint.box`) still wins: naming a box asserts what it can run, and it is
+      the only way such a task uses an owned box. A colocation pin (4g) is a box target too, so the
+      siblings of a group board the box its first member rented: give every member of a group the
+      same minimums.
 5. **Rent sequence** (crash-safe money ordering): event `rent_intent` (with offer JSON, before
    any spend) → `vastai create instance` → insert the `instances` row using the id Vast just
    returned (state `provisioning`, label `runq_<task_id>`, `hard_cap_at = now + hard_cap_hours`,
