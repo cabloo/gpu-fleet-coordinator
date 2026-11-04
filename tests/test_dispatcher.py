@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -848,6 +849,58 @@ class TestRunOrTimeout:
     def test_fast_command_returns_output_normally(self):
         r = disp._run_or_timeout(subprocess.run, ["sh", "-c", "echo hi"], timeout=10)
         assert r.returncode == 0 and r.stdout.strip() == "hi"
+
+    def test_a_command_that_ignores_SIGTERM_is_still_killed_inside_the_grace(self):
+        """7i: the SIGTERM step may not reopen the 2026-07-14 wedge — a group that ignores it is
+        SIGKILLed once `term_grace` runs out."""
+        cmd = ["sh", "-c", "trap '' TERM; sleep 30 & wait"]
+        t0 = time.monotonic()
+        r = disp._run_or_timeout(subprocess.run, cmd, timeout=1, term_grace=1)
+        elapsed = time.monotonic() - t0
+        assert r.returncode == 124
+        assert elapsed < 10, f"wedged: took {elapsed:.1f}s"
+
+
+@pytest.mark.slow
+class TestATimedOutPullParksItsPartialAndTheNextOneResumes:
+    """Invariant 7i — 7g's `--partial-dir` only works if rsync is allowed to park the partial.
+
+    7g passed `--partial-dir` so a checkpoint too big for one 60s pull would converge across
+    retries, but `_run_or_timeout` SIGKILLed the group: rsync cannot catch SIGKILL, so the partial
+    stayed a `.ckpt_latest.pt.XXXXXX` temp that nothing resumes, and every attempt restarted at byte
+    0. Found 2026-11-04: a running task's checkpoint (above 1 GB) had not come home in 19 h while a
+    fresh ~1 GB temp appeared every attempt. With SIGTERM first, rsync parks the partial in
+    `.rsync-partial/` and the next attempt sends only the rest. Real rsync, local to local, throttled
+    so the first attempt cannot finish; `--no-whole-file` gives the delta transfer a pull over ssh
+    uses by default."""
+
+    def _rsync(self, src, dst, *extra):
+        return ["rsync", "-rt", "--no-whole-file", f"--partial-dir={disp.PARTIAL_DIR}", *extra,
+                f"{src}/", f"{dst}/"]
+
+    def test_sigterm_parks_the_partial_and_the_retry_resumes_from_it(self, tmp_path):
+        if shutil.which("rsync") is None:
+            pytest.skip("rsync not installed")
+        src, dst = tmp_path / "src", tmp_path / "dst"
+        src.mkdir()
+        dst.mkdir()
+        payload = os.urandom(20_000_000)
+        (src / "ckpt_latest.pt").write_bytes(payload)
+
+        r = disp._run_or_timeout(subprocess.run, self._rsync(src, dst, "--bwlimit=4000"),
+                                 timeout=2, term_grace=disp.PULL_TERM_GRACE_S)
+        assert r.returncode == 124
+        parked = dst / disp.PARTIAL_DIR / "ckpt_latest.pt"
+        assert parked.exists() and 0 < parked.stat().st_size < len(payload), (
+            "the timed-out pull did not park a partial in the partial-dir")
+        leaked = [p.name for p in dst.iterdir() if p.name.startswith(".ckpt_latest.pt.")]
+        assert not leaked, f"the timed-out pull left an unresumable temp: {leaked}"
+
+        r = disp._run_or_timeout(subprocess.run, self._rsync(src, dst, "--stats"), timeout=60,
+                                 term_grace=disp.PULL_TERM_GRACE_S)
+        assert r.returncode == 0, r.stderr
+        assert "Matched data: 0 bytes" not in r.stdout, "the retry did not reuse the partial"
+        assert (dst / "ckpt_latest.pt").read_bytes() == payload
 
 
 class TestStallDecision:
@@ -5830,7 +5883,7 @@ class TestIngestReportsItsOwnBreakdown:
         it, or a fleet of unreachable boxes reads as 'barely any rsyncs' while burning 60s each."""
         d, _ = self._dispatcher(tmp_path, monkeypatch)
         monkeypatch.setattr(disp, "_run_or_timeout",
-                            lambda run, cmd, timeout: _FakeProc(1, "connection refused"))
+                            lambda run, cmd, timeout, **kw: _FakeProc(1, "connection refused"))
         d._ingest_and_complete()
         assert d._ingest_detail["total_rsyncs"] > 0
 

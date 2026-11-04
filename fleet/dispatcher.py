@@ -3087,6 +3087,9 @@ def _rsync_ssh_opt(port: int) -> str:
 # instead of leaking a fresh full-size temp. One well-known name per destination, so the reaper can
 # recognise it — unlike rsync's default `.name.<6 random>`, of which every attempt makes a new one.
 PARTIAL_DIR = ".rsync-partial"
+# Invariant 7i: how long a timed-out pull gets between SIGTERM (rsync parks its partial in
+# PARTIAL_DIR) and SIGKILL. Measured: rsync parks it and exits well under a second.
+PULL_TERM_GRACE_S = 5.0
 # rsync's DEFAULT temp form, which is what leaked before 7g: a leading dot, then the real filename,
 # then a 6-char random suffix — created mode 0600. Verified against the live tree 2026-07-31: this
 # pattern AND that mode together matched 210.1 GB in 340 files and NOTHING else, so the two checks
@@ -3102,7 +3105,7 @@ _PARTIAL_MAX_AGE_H = 48.0
 _SNAPSHOT_KEEP_H = 72.0
 
 
-def _run_or_timeout(run, cmd, timeout: int) -> subprocess.CompletedProcess:
+def _run_or_timeout(run, cmd, timeout: int, term_grace: float = 0.0) -> subprocess.CompletedProcess:
     """Transport calls NEVER raise on a hang (retrospective bug 6): a TimeoutExpired becomes an
     ordinary failed CompletedProcess (rc 124, the timeout(1) convention), so invariant 9a's
     consecutive-failure counter sees it and the poll loop survives it.
@@ -3114,7 +3117,12 @@ def _run_or_timeout(run, cmd, timeout: int) -> subprocess.CompletedProcess:
     reconcile/ingest — a timeout that doesn't actually free the loop. Fix: for the real subprocess
     path, launch the command in its OWN process group (`start_new_session`) and SIGKILL the WHOLE
     group on timeout, so no orphaned grandchild can keep the pipe open. An injected/fake `run` (unit
-    tests, decision-core doubles) keeps the simple path — it never spawns a real process."""
+    tests, decision-core doubles) keeps the simple path — it never spawns a real process.
+
+    Invariant 7i (2026-11-04): `term_grace > 0` sends the group SIGTERM first and waits that long
+    before the SIGKILL. rsync catches SIGTERM and parks its partial in `--partial-dir`; a SIGKILL
+    leaves it as a `.name.XXXXXX` temp that nothing resumes, which is what silently defeated 7g.
+    Default 0 keeps every other caller's kill exactly as it was."""
     if run is not subprocess.run:
         try:
             return run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -3126,6 +3134,16 @@ def _run_or_timeout(run, cmd, timeout: int) -> subprocess.CompletedProcess:
         out, err = proc.communicate(timeout=timeout)
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     except subprocess.TimeoutExpired:
+        if term_grace > 0:
+            # 7i: ask first. start_new_session made the child its group's leader, so its pid IS the
+            # group id, and killpg still reaches the group after the leader itself has exited.
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.communicate(timeout=term_grace)
+                return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=f"timeout after {timeout}s")
+            except subprocess.TimeoutExpired:
+                pass                             # ignored SIGTERM, or a grandchild holds a pipe
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # child + every grandchild it spawned
         with contextlib.suppress(subprocess.TimeoutExpired):
@@ -3211,7 +3229,8 @@ def rsync_pull(host: str, port: int, remote_path: str, local_path: str, includes
     cmd += ["--exclude", "*", f"root@{host}:{remote_path}", local_path]
     with _RSYNC_LOCK:                           # invariant 23b/23c: count, seconds/call
         _RSYNC_CALLS["n"] += 1
-    out = _run_or_timeout(run, cmd, 60)
+    # 7i: on the partial-dir path, SIGTERM before SIGKILL so the partial is parked and resumed.
+    out = _run_or_timeout(run, cmd, 60, **({} if append else {"term_grace": PULL_TERM_GRACE_S}))
     if out.returncode == 0:
         return True
     if _pull_hit_local_enospc(getattr(out, "stderr", "")):

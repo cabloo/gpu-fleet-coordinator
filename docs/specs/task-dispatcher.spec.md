@@ -1244,6 +1244,20 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
       while its task runs and is aged against the longest plausible run (48 h). Both are guarded by
       the name pattern **and** mode 0600, which together matched 210.1 GB in 340 files and nothing
       else on the live tree — a file failing either check is left alone.
+   b-iii. **7i — a timed-out pull is asked to stop before it is killed, so 7g's partial is actually
+      parked** (2026-11-04). 7g's "converges across retries" never happened: rsync moves its temp
+      into `--partial-dir` only when it can run its exit cleanup, and `_run_or_timeout` sent the
+      group SIGKILL, which it cannot catch. So the temp stayed a `.name.<6 random>` (reaped by 7g's
+      1 h orphan sweep) and every attempt restarted at byte 0. Found on a running task whose
+      checkpoint is above 1 GB: no complete pull in 19 h, a fresh ~1 GB temp every attempt.
+      `_run_or_timeout` now takes `term_grace`; `rsync_pull` passes `PULL_TERM_GRACE_S` (5 s) on
+      the partial-dir path, so a timed-out pull gets SIGTERM, parks its partial, and the next
+      attempt sends only the rest. Measured with real rsync: SIGTERM leaves the partial in
+      `.rsync-partial/` and the retry's matched data equals it; SIGKILL leaves only the random
+      temp. A group that ignores SIGTERM is SIGKILLed when the grace runs out, so the 2026-07-14
+      wedge stays closed. Every other caller keeps `term_grace=0` and its kill unchanged. A
+      checkpoint the trainer rewrites between two attempts still restarts (the partial no longer
+      matches), so convergence needs the file to stay put for about two pull intervals.
    c. *Periodic checkpoint pull*: at most every `checkpoint_pull_every_min`, additionally pull
       `out/ckpt_latest.pt` for every task currently `running`, into
       `experiments/<grp>/<name>/ckpt_latest.pt`; on success, stamp `tasks.resume_checkpoint` with
