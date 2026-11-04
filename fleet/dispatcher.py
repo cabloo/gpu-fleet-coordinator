@@ -6907,8 +6907,19 @@ class Dispatcher:
     def _complete_done(self, task: dict, inst: dict, host: str, port: int) -> None:
         local_out = self._result_dir(task)
         remote = f"~/spool/active/{task['id']}/out/"
-        includes = ["*/", "tb/**", "*.json", "*.jsonl", "*.log", "ckpt_*.pt"]
-        ok = rsync_pull(host, port, remote, str(local_out) + "/", includes, run=self.run)
+        # Invariant 9h: the RESULTS come home in their own pull, BEFORE the checkpoints. rsync sends
+        # files in name order, so with `ckpt_*.pt` in the same call a checkpoint that cannot move
+        # inside the 60s budget (`ckpt_latest.pt` sorts before `evaluate.json`, `samples.jsonl`, …)
+        # is killed mid-file and NOTHING after it lands. 9g's narrow retry then brings home the
+        # completion artifact alone, the task goes `done`, nothing re-pulls a terminal task, and
+        # the box is torn down with the run's other outputs on it. The checkpoint pull follows and
+        # may still fail; 29a's evidence check then keeps the box dir and alerts.
+        results = rsync_pull(host, port, remote, str(local_out) + "/",
+                             ["*/", "tb/**", "*.json", "*.jsonl", "*.log"], run=self.run)
+        ckpts = (LOCAL_DISK_FULL if results is LOCAL_DISK_FULL else
+                 rsync_pull(host, port, remote, str(local_out) + "/", ["*/", "ckpt_*.pt"],
+                            run=self.run))
+        ok = LOCAL_DISK_FULL if LOCAL_DISK_FULL in (results, ckpts) else (results and ckpts)
         self.tracker.record(inst["id"], ok)
         if ok is LOCAL_DISK_FULL:
             # free-space-guard inv. 6: OUR disk refused the results. Deferred whole — even if the
@@ -6944,8 +6955,9 @@ class Dispatcher:
             #
             # This is the SAME failure class the 2026-07-11 note above describes ("runs with a valid
             # results.json on disk were lost as artifact_missing"); that fix added the retry, and this
-            # one makes the retry actually able to succeed. The bulk artifacts are not lost — the next
-            # ingest pass keeps pulling them; only the COMPLETION DECISION is decoupled from having to
+            # one makes the retry actually able to succeed. (The bulk artifacts are NOT re-pulled by a
+            # later ingest pass: nothing re-pulls a terminal task. 9h above keeps the results from
+            # riding behind the checkpoints.) Only the COMPLETION DECISION is decoupled from having to
             # move hundreds of MB inside one timeout.
             retry = rsync_pull(host, port, remote, str(local_out) + "/",
                                 [entry.completion_artifact], run=self.run)

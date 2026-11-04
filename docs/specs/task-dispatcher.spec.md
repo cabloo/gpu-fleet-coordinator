@@ -1297,6 +1297,21 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
        **General shape worth remembering: a retry that is byte-identical to the attempt that just
        failed only helps against transient faults. If the failure is deterministic in the payload,
        the retry must be NARROWER, not merely repeated.**
+       (The sentence above, "the next ingest pass keeps pulling them", is false: nothing re-pulls a
+       terminal task. See 9h.)
+    i. *The results come home in their own pull, BEFORE the checkpoints* (invariant 9h, 2026-11-04).
+       9g let the completion DECISION survive a checkpoint too big for one pull, but not the run's
+       other outputs. rsync sends files in name order, so in one `out/`-rooted pull carrying
+       `ckpt_*.pt`, `ckpt_latest.pt` goes first; when it cannot move inside the 60s budget the pull
+       is killed mid-file and every result after it in name order (`evaluate.json`,
+       `samples.jsonl`, …) stays on the box. 9g's narrow retry lands the completion artifact alone,
+       the task goes `done`, nothing re-pulls a terminal task, and the rented box is torn down with
+       the outputs on it. Found 2026-11-04 on a running task, before it finished: a LoRA run on a 9B
+       model whose `ckpt_latest.pt` is above 1 GB, on a link that moved about 1 GB per 60s attempt,
+       so every periodic checkpoint pull of it had already failed. `_complete_done` now pulls
+       `["*/", "tb/**", "*.json", "*.jsonl", "*.log"]` first and `["*/", "ckpt_*.pt"]` second; a
+       failed checkpoint pull leaves 29a's evidence check to keep the box dir and alert. A local
+       `LOCAL_DISK_FULL` on either pull still defers the whole completion (free-space-guard inv. 6).
 
     g. *PREFER the trainer's own structured crash record over the log tail* (2026-07-30). On an
        uncaught exception `shared.infra.run` writes **`out/crash.json`** (`{"traceback": "…"}`) — a

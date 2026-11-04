@@ -4921,13 +4921,12 @@ class TestTheCompletionRetryMustNotRepeatTheBulkPull:
 
         def fake_pull(host, port, remote, local, includes, **kw):
             calls.append(tuple(includes))
-            # the bulk pull TIMES OUT on the 235 MB sibling and lands nothing
-            if any("ckpt_" in i for i in includes):
-                return False
             # a narrow pull of just the small artifact succeeds
-            if entry.completion_artifact in includes:
+            if list(includes) == [entry.completion_artifact]:
                 (out / entry.completion_artifact).write_text("{}")
                 return True
+            # every BULK pull (the results pull and the checkpoint pull, 9h) times out and lands
+            # nothing
             return False
 
         monkeypatch.setattr(disp, "rsync_pull", fake_pull)
@@ -4939,12 +4938,12 @@ class TestTheCompletionRetryMustNotRepeatTheBulkPull:
         assert row["state"] == "done", (
             f"a COMPLETED run was discarded as {row['state']} because a sibling checkpoint was too "
             "big to move inside one timeout")
-        assert len(calls) == 2, calls
-        assert any("ckpt_" in i for i in calls[0]), "first pull should still be the bulk ingest"
-        assert not any("ckpt_" in i for i in calls[1]), (
-            f"the RETRY repeated the bulk includes {calls[1]} — that re-attempts the transfer that "
+        assert len(calls) == 3, calls
+        assert any("*.json" in i for i in calls[0]), "first pull should be the bulk results ingest"
+        assert any("ckpt_" in i for i in calls[1]), "second pull should be the checkpoints"
+        assert calls[2] == (entry.completion_artifact,), (
+            f"the RETRY repeated bulk includes {calls[2]} — that re-attempts the transfer that "
             "just failed, so when the cause is SIZE the retry can never succeed")
-        assert entry.completion_artifact in calls[1]
 
     def test_a_genuinely_missing_artifact_still_fails(self, tmp_path, monkeypatch):
         """The narrow retry must not INVENT a completion: no artifact anywhere -> task_failed."""
@@ -4955,6 +4954,77 @@ class TestTheCompletionRetryMustNotRepeatTheBulkPull:
                           inst, "example.com", 2222)
         row = dict(d.conn.execute("SELECT * FROM tasks WHERE id='CD1'").fetchone())
         assert row["state"] == "task_failed", row["state"]
+
+
+class TestTheResultsComeHomeBeforeTheCheckpoints:
+    """Invariant 9h — a checkpoint too big for one pull must not keep a finished run's results away.
+
+    rsync sends files in name order, so with `ckpt_*.pt` in the same pull as the results,
+    `ckpt_latest.pt` (above 1 GB for a LoRA run on a 9B model, against a link that moved about 1 GB
+    in the 60s budget) goes first, is killed mid-file, and every result file after it in name order
+    (`evaluate.json`, `samples.jsonl`, …) stays on the box. 9g's narrow retry then lands the
+    completion artifact alone, the task goes `done`, nothing re-pulls a terminal task, and the
+    rented box is torn down with the outputs on it. Found 2026-11-04 on a running task, before it
+    finished.
+    """
+
+    def _done_box(self, tmp_path, monkeypatch):
+        return TestTheCompletionRetryMustNotRepeatTheBulkPull._done_box(self, tmp_path, monkeypatch)
+
+    def test_a_checkpoint_that_cannot_move_does_not_strand_the_results(self, tmp_path,
+                                                                        monkeypatch):
+        d, out = self._done_box(tmp_path, monkeypatch)
+        entry = disp.entrypoints.resolve(
+            dict(d.conn.execute("SELECT * FROM tasks WHERE id='CD1'").fetchone()))
+        calls = []
+
+        def fake_pull(host, port, remote, local, includes, **kw):
+            calls.append(tuple(includes))
+            if any("ckpt_" in i for i in includes):
+                return False                     # the checkpoint times out and lands nothing
+            if "*.jsonl" in includes:            # the results pull lands every small file
+                (out / entry.completion_artifact).write_text("{}")
+                (out / "samples.jsonl").write_text("{}\n")
+                return True
+            return False
+
+        monkeypatch.setattr(disp, "rsync_pull", fake_pull)
+        inst = dict(d.conn.execute("SELECT * FROM instances WHERE id=1").fetchone())
+        d._complete_done(dict(d.conn.execute("SELECT * FROM tasks WHERE id='CD1'").fetchone()),
+                          inst, "example.com", 2222)
+
+        row = dict(d.conn.execute("SELECT * FROM tasks WHERE id='CD1'").fetchone())
+        assert row["state"] == "done", row["state"]
+        assert (out / "samples.jsonl").exists(), (
+            "a result file stayed on the box because it rode in the same pull as a checkpoint "
+            "too big to move")
+        assert not any("ckpt_" in i for i in calls[0]), (
+            f"the first pull {calls[0]} carries the checkpoints, so they go first in name order")
+        assert any("ckpt_" in i for i in calls[1]), "the checkpoints are still pulled, second"
+        assert len(calls) == 2, f"the artifact landed with the results, so no retry: {calls}"
+
+    def test_a_full_local_disk_on_the_checkpoint_pull_still_defers_the_whole_completion(
+            self, tmp_path, monkeypatch):
+        """Inv. 6 holds across the split: `done` is terminal, so a pull OUR disk refused must not
+        declare it, even when the results pull before it succeeded."""
+        d, out = self._done_box(tmp_path, monkeypatch)
+        entry = disp.entrypoints.resolve(
+            dict(d.conn.execute("SELECT * FROM tasks WHERE id='CD1'").fetchone()))
+
+        def fake_pull(host, port, remote, local, includes, **kw):
+            if any("ckpt_" in i for i in includes):
+                return disp.LOCAL_DISK_FULL
+            (out / entry.completion_artifact).write_text("{}")
+            return True
+
+        monkeypatch.setattr(disp, "rsync_pull", fake_pull)
+        inst = dict(d.conn.execute("SELECT * FROM instances WHERE id=1").fetchone())
+        d._complete_done(dict(d.conn.execute("SELECT * FROM tasks WHERE id='CD1'").fetchone()),
+                          inst, "example.com", 2222)
+
+        row = dict(d.conn.execute("SELECT * FROM tasks WHERE id='CD1'").fetchone())
+        assert row["state"] == "running", row["state"]
+        assert d._space_deferred == 1
 
 
 class TestABoxDirIsNotDeletedWhileItsEvidenceIsStillOnIt:
