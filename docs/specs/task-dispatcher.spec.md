@@ -981,6 +981,18 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
    9c/17b), and treating the old attempt's `active/<id>` as "already delivered" would silently
    ship the FIRST attempt's `task.json` forever — dropping the resumed run's `resume.pt`/
    `--init-from` on every re-ship without ever surfacing an error.
+   7j. **The re-ship clear keeps `incoming/<id>/bundle.tar`** (2026-11-05). It removes
+   `active/<id>` and everything else in `incoming/<id>` (`READY` above all), never the bundle file.
+   The clear runs at the start of EVERY ship call, so while it removed `incoming/<id>` whole it
+   deleted the partial that invariant 7's resumable push had left, and a re-ship had to move its
+   whole bundle inside one call (3 × 120s): a bundle carrying a big checkpoint was undeliverable.
+   Found live: a requeued task whose bundle held a 2.35 GB checkpoint failed every call through a
+   slow ssh proxy while the box answered everything else. A first ship never had this problem (it
+   clears nothing). Keeping the file is safe for the same three reasons invariant 7 gives: the
+   worker claims only on `READY`, removed here and pushed strictly after a successful payload push;
+   rsync makes the kept file identical to the new bundle whatever it held; and the box verifies the
+   sha256 manifest before extracting. A task's bundle is deterministic (zeroed member times, fixed
+   member order, the same `task.json`), so the delta pass reuses what already arrived.
 7c. **A ship pass is BOUNDED even when every ship SUCCEEDS** (2026-07-29). 7b retires a box whose
    transport is broken; this is the complementary case — ship work that is merely slow and
    plentiful, which starves ingest just as effectively. `_ingest_and_complete` runs at the TOP of a

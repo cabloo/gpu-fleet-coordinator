@@ -3240,6 +3240,27 @@ def rsync_pull(host: str, port: int, remote_path: str, local_path: str, includes
     return False
 
 
+def reship_clear_cmd(task_id: str) -> str:
+    """Invariant 7j: the remote command that clears a RE-shipped task's earlier attempt from its box,
+    keeping only `incoming/<id>/bundle.tar`.
+
+    The re-ship clear exists to drop the earlier attempt's `READY` and `active/<id>` (see `_ship`).
+    It used to `rm -rf` the whole `incoming/<id>`, and it runs at the start of EVERY ship call — so
+    the partial bundle that invariant 7's `--partial --inplace` push leaves behind was deleted
+    before the next call could resume it. A re-ship therefore had to move its whole bundle in one
+    call (3 attempts of 120 s), and a bundle carrying a big checkpoint could never arrive. Found
+    2026-11-05: a requeued task whose bundle held a 2.35 GB checkpoint failed every call through a
+    slow ssh proxy. Keeping the file is safe: the worker claims only on `READY`, which is deleted
+    here and pushed strictly after a successful payload push; rsync makes the kept file identical
+    to the new bundle whatever it held; and the box verifies the bundle's sha256 manifest before
+    extracting. The bundle is deterministic for one task (zeroed member times, fixed order), so the
+    delta pass reuses what already arrived."""
+    incoming = f"~/spool/incoming/{task_id}"
+    return (f"rm -rf ~/spool/active/{task_id}; "
+            f"if [ -d {incoming} ]; then find {incoming} -mindepth 1 -maxdepth 1 "
+            f"! -name {bundle.BUNDLE_NAME} -exec rm -rf {{}} +; fi")
+
+
 def rsync_push(host: str, port: int, local_paths: list, remote_path: str, run=subprocess.run) -> bool:
     """Invariant 7 — RESUMABLE. `--partial --inplace` is load-bearing, not a tuning nicety: without
     it a push that outruns the 120s budget is pure waste, because `_run_or_timeout` SIGKILLs the
@@ -9236,10 +9257,9 @@ class Dispatcher:
             # existence check below would otherwise mistake for "already delivered" and skip —
             # silently dropping the new resume.pt/`--init-from` and leaving the task looking
             # "shipped" while nothing was actually re-sent. We've already pulled everything of
-            # value home by this point, so clear it before delivering the fresh attempt.
-            ssh_run(host, port,
-                    f"rm -rf ~/spool/incoming/{tid} ~/spool/active/{tid}",
-                    run=self.run)
+            # value home by this point, so clear it before delivering the fresh attempt —
+            # except the bundle itself (invariant 7j, `reship_clear_cmd`).
+            ssh_run(host, port, reship_clear_cmd(tid), run=self.run)
         else:
             # Check for READY specifically, not just the incoming/<id> directory -- a prior
             # attempt can die between pushing payload+task.json and pushing READY (invariant 7's

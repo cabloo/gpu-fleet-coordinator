@@ -2364,8 +2364,68 @@ class TestReshipClearsStaleBoxState:
         inst = dict(d.conn.execute("SELECT * FROM instances WHERE id=1").fetchone())
         d._ship(task, inst)
         joined = run.joined()
-        assert any("rm -rf" in c and "T2" in c for c in joined)
+        assert any("rm -rf ~/spool/active/T2" in c for c in joined)
         assert not any("test -e" in c for c in joined)
+        # Invariant 7j: the clear keeps the partial bundle, so it never removes incoming/<id> whole.
+        assert not any("rm -rf ~/spool/incoming/T2" in c for c in joined)
+        assert any(f"! -name {disp.bundle.BUNDLE_NAME}" in c for c in joined)
+
+
+class TestAReshipKeepsItsPartialBundle:
+    """Invariant 7j — the re-ship clear keeps `incoming/<id>/bundle.tar`, so a bundle too big for one
+    ship call converges across calls instead of restarting at byte 0 every call. Found 2026-11-05: a
+    requeued task's bundle (a 2.35 GB checkpoint) failed every call through a slow ssh proxy, because
+    each call began by deleting the partial the call before had left."""
+
+    def _clear(self, home, task_id):
+        return subprocess.run(["sh", "-c", disp.reship_clear_cmd(task_id)], env={**os.environ, "HOME": str(home)},
+                              capture_output=True, text=True)
+
+    def test_the_clear_keeps_only_the_bundle(self, tmp_path):
+        incoming, active = tmp_path / "spool/incoming/T7", tmp_path / "spool/active/T7"
+        incoming.mkdir(parents=True)
+        active.mkdir(parents=True)
+        (incoming / disp.bundle.BUNDLE_NAME).write_bytes(b"partial")
+        (incoming / "READY").write_text("")
+        (incoming / "stray").mkdir()
+        (active / "task.json").write_text("{}")
+        assert self._clear(tmp_path, "T7").returncode == 0
+        assert sorted(p.name for p in incoming.iterdir()) == [disp.bundle.BUNDLE_NAME]
+        assert (incoming / disp.bundle.BUNDLE_NAME).read_bytes() == b"partial"
+        assert not active.exists()
+
+    def test_the_clear_is_quiet_when_nothing_is_there(self, tmp_path):
+        out = self._clear(tmp_path, "T8")
+        assert out.returncode == 0 and out.stderr == ""
+
+    @pytest.mark.slow
+    def test_an_interrupted_push_survives_the_clear_and_the_next_push_resumes_it(self, tmp_path):
+        """Real rsync with `rsync_push`'s flags, local to local and throttled so the first push cannot
+        finish; `--no-whole-file` gives the delta pass a push over ssh uses by default."""
+        if shutil.which("rsync") is None:
+            pytest.skip("rsync not installed")
+        src = tmp_path / "staging"
+        src.mkdir()
+        payload = os.urandom(20_000_000)
+        (src / disp.bundle.BUNDLE_NAME).write_bytes(payload)
+        remote = tmp_path / "spool/incoming/T9"
+
+        def push(*extra, timeout):
+            cmd = ["rsync", "-rt", "--no-whole-file", "--partial", "--inplace", "--mkpath", *extra,
+                   str(src / disp.bundle.BUNDLE_NAME), f"{remote}/"]
+            return disp._run_or_timeout(subprocess.run, cmd, timeout)
+
+        assert push("--bwlimit=4000", timeout=2).returncode == 124
+        kept = remote / disp.bundle.BUNDLE_NAME
+        assert 0 < kept.stat().st_size < len(payload), "the interrupted push left no partial bundle"
+        (remote / "READY").write_text("")                     # an earlier attempt's marker
+        assert self._clear(tmp_path, "T9").returncode == 0
+        assert kept.exists() and not (remote / "READY").exists()
+
+        r = push("--stats", timeout=60)
+        assert r.returncode == 0, r.stderr
+        assert "Matched data: 0 bytes" not in r.stdout, "the next push did not reuse the partial"
+        assert kept.read_bytes() == payload
 
     def test_first_ship_existence_check_requires_ready_not_just_the_directory(self, tmp_path):
         """Regression: found live 2026-07-09 against a real stuck Vast box — a prior ship
