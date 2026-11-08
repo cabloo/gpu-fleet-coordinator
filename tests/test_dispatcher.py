@@ -6359,6 +6359,32 @@ class TestBoxTargeting:
         # INERTNESS: a task that does not ask for a GPU still sees every box, unchanged.
         assert {i["id"] for i in disp._boardable(self._task(), real)} == {i["id"] for i in real}
 
+    def test_the_REAL_instance_view_carries_the_probed_driver_and_card(self, tmp_path):
+        """Invariant 4j's pack half reads `cuda_max_good` / `compute_cap` off the view, from the box's
+        newest probe (`_box_res`). The `gpu_name` lesson above, on this axis: drive the predicate with
+        the view the producer emits, not with a hand-built dict that happens to carry the keys."""
+        d = disp.Dispatcher(str(tmp_path / "runs.sqlite"), run=_RecordingRun(),
+                            vastai_run=_RecordingRun())
+        reg = _seed_instance_and_task(d.conn, task_id="_seed", instance_id=99)
+        for iid, label in ((-1, "laptop-gpu"), (-4, "gpudesktop"), (-3, "tower")):
+            d.conn.execute(
+                "INSERT INTO instances(id, machine_id, label, created_at, state, dph_usd, gpu_name, "
+                "ssh_host, ssh_port, slots_total, hard_cap_at, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (iid, None, label, reg.now_iso(), "live", 0.0, "A GPU", "h", 22, 8, reg.now_iso(), "owned"))
+        d.conn.commit()
+        base = "NPROC 8\nLOAD 0 0 0 1/1 1\nMEM 32000 24000\nGPU 8192, 512, 40, 10, A GPU\n"
+        d._box_res[-1] = disp.parse_box_probe(base + "CUDAV 12.7\nCCAP 8.9\n")
+        d._box_res[-4] = disp.parse_box_probe(base + "CUDAV 13.0\nCCAP 12.0\n")
+        view = {v["id"]: v for v in d._instances_view()}
+        assert (view[-1]["cuda_max_good"], view[-1]["compute_cap"]) == (12.7, 890)
+        assert (view[-4]["cuda_max_good"], view[-4]["compute_cap"]) == (13.0, 1200)
+        assert (view[-3]["cuda_max_good"], view[-3]["compute_cap"]) == (None, None), "never probed"
+        task = self._task(resource_hint={"requires_gpu": True, "min_cuda": 13.0})
+        assert [i["id"] for i in disp._boardable(task, list(view.values()))] == [-4]
+        # INERTNESS: without minimums every GPU box is still boardable.
+        plain = self._task(resource_hint={"requires_gpu": True})
+        assert {-1, -4, -3} <= {i["id"] for i in disp._boardable(plain, list(view.values()))}
+
     def test_NO_placement_key_is_missing_from_the_real_view_MECHANICAL(self):
         """⛔ THE GENERALISATION, because hand-listing the keys failed twice (`label` 2026-08-08,
         `gpu_name` 2026-09-04) and the second slipped past a test written for the first.
@@ -6389,7 +6415,9 @@ class TestBoxTargeting:
                      "_relief_already_in_flight", "place", "_infeasible_everywhere",
                      "consolidation_drains", "_pending_footprint", "endpoint_for",
                      # invariant 4i (forced box placement) reads the same view
-                     "_forced_fits", "admission_refusals", "_forced_hold_reason"}
+                     "_forced_fits", "admission_refusals", "_forced_hold_reason",
+                     # invariant 4j's pack half reads the probed driver and card off the view
+                     "instance_meets_minimums"}
         INST_PARAMS = {"inst", "i", "instance", "target", "victim", "box"}
 
         def bases(node):
@@ -6417,6 +6445,7 @@ class TestBoxTargeting:
                     read.setdefault(key, set()).add(node.name)
 
         assert "gpu_name" in read, "the scan stopped seeing `instance_has_gpu` — guard is blind"
+        assert "cuda_max_good" in read, "the scan stopped seeing `instance_meets_minimums` — guard is blind"
         missing = {k: sorted(v) for k, v in read.items() if k not in emitted}
         assert not missing, (
             f"`_instances_view` does not emit {sorted(missing)}, which placement reads off an "

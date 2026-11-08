@@ -831,14 +831,34 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
       `cpu_name_allowed`: an offer that does not publish the field is refused, so a task with no
       qualifying offer holds `no_offer` rather than renting a box it cannot use.
 
-      j3. *Pack half, deliberately reusing 4f.* The `instances` row records no driver, so a task with
-      minimums boards only the box rented for it (`runq_<task id>`, vetted at rent time) through the
-      same `_boardable` rule as a CPU-targeted task. That rule carries 4f's three regressions and
-      its known limitation (a targeted task that claims every slot can be gazumped and re-rent).
-      A box target (`resource_hint.box`) still wins: naming a box asserts what it can run, and it is
-      the only way such a task uses an owned box. A colocation pin (4g) is a box target too, so the
-      siblings of a group board the box its first member rented: give every member of a group the
-      same minimums.
+      j3. *Pack half.* A task with minimums boards, through `_boardable`, any box whose probe
+      reading meets every minimum it sets (`instance_meets_minimums`), and the box rented for it
+      (`runq_<task id>`, vetted at rent time) while that box's probe has not read a field it sets.
+      The box probe (invariant 22) carries two keyed lines for this: `CUDAV`, the highest CUDA
+      version the driver runs, read from `nvidia-smi`'s banner because no query field reports it,
+      and `CCAP`, each card's architecture. Both calls run in one shell under one `timeout -k 2 5`,
+      so a driver slow on every call costs the pair at most 7 s. That shell ignores the stop
+      signal on purpose: had it died at 5 s, `timeout` would exit with it and never send the kill,
+      and a driver call that ignores the stop signal would keep the pipe open and the probe
+      waiting; kept alive, it lets the kill at 7 s reach every process `timeout` started. `parse_box_probe` names and scales
+      them as Vast does (`cuda_max_good` 12.7, `compute_cap` 890 for 8.9), so one comparison serves
+      a box and an offer. A box with several cards reads its weakest; any `CCAP` line that is not
+      a reading, or a count of them other than the `GPU` line's card count (a reply the timeout
+      cut short), leaves the field unmeasured. `_instances_view` carries both from the box's newest
+      full probe. `box_measured` does not carry them: its text and payload stay byte for byte as
+      31c fixes them. Until the probe answers (a coordinator that has just started,
+      a refusing driver, no card) they read None and the box is refused, FAIL-CLOSED as on the rent
+      side. The own rental passes while unread because the task may come to board its fresh box
+      before that box's first probe: refusing it there is 4f's regression 2, a rent every poll. A
+      reading below a minimum refuses even the own rental, since the task would fail its GPU check
+      there. A CPU-targeted task (4f) with
+      minimums still boards only its own rental, since no box records its CPU. *Measured, the reason
+      (b) exists:* before it, a task with minimums could not use an owned box at all, so a job built
+      for CUDA 13 was queued without them, packed onto an owned laptop whose driver runs CUDA 12.7
+      and failed its GPU check within a minute, twice. A box target (`resource_hint.box`) still
+      wins: naming a box asserts what it can run. A colocation pin (4g) is a box target too, so the
+      siblings of a group board the box its first member boarded: give every member of a group
+      the same minimums.
 5. **Rent sequence** (crash-safe money ordering): event `rent_intent` (with offer JSON, before
    any spend) → `vastai create instance` → insert the `instances` row using the id Vast just
    returned (state `provisioning`, label `runq_<task_id>`, `hard_cap_at = now + hard_cap_hours`,
@@ -2586,7 +2606,10 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
     invariant 21c and hint-vs-actual visibility. Read-only, best-effort, **in-memory** (invariant 1:
     a restart just re-measures within a cadence, mirroring the owned-unreachable counter — no
     teardown/rent decision depends on it). A box without `nvidia-smi` or unreachable carries no
-    measurement (21c falls back to the hint). Per-process attribution is deliberately NOT used — it
+    measurement (21c falls back to the hint). One placement read does depend on it, fail-closed:
+    invariant 4j's pack half boards a task with minimums only on a box whose probe read the
+    driver's CUDA version and the card's architecture (4j j3), so until the first probe after a
+    restart such a task boards only its own rental. Per-process attribution is deliberately NOT used — it
     reads `[N/A]` under WSL2 (the owned laptop) — so the box-level total is the robust signal, and a
     whole-box drain (21a) needs only the box aggregate anyway.
 
@@ -3347,6 +3370,9 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
          with other work shows it, and no other reading here does.
        - `DISK`: the size and the free space of the filesystem the spool is on (`disk_total_gb`,
          `disk_free_gb`).
+       - `CUDAV` and `CCAP` belong to invariant 4j, not here: the driver's CUDA version and each
+         card's architecture, which a task's minimums are checked against (4j j3). Neither the
+         reading row nor `box_measured` carries them.
     c. *`box_measured` does not change:* same cadence, same text, same payload, byte for byte. The
        new fields go to the reading row. `_box_res` carries them and nothing reads them there.
        The one other place they show is the on-demand probe's `box_probe` event, whose `measured`

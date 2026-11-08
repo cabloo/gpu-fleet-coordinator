@@ -785,6 +785,20 @@ BOX_PROBE_CMD = (
     "x=$(timeout -k 2 5 nvidia-smi --query-gpu=temperature.gpu,power.draw,power.limit "
     "--format=csv,noheader,nounits 2>&1) || x= ;; *) x= ;; esac ;; *) x= ;; esac; "
     "[ -n \"$x\" ] && echo \"$x\" | awk '{print \"GPUX\", $0}'; "
+    # Invariant 4j's pack half: the highest CUDA version the driver runs, read from nvidia-smi's
+    # banner because no query field reports it (the banner also says "Driver Version:", hence the
+    # word before), and each card's architecture after the `@CCAP` marker. Two calls kept off the
+    # `GPU` line for the reason the GPUX line gives, under ONE `timeout`, so a driver slow on every
+    # call costs this pair at most 7 s, not 7 s each. The inner shell ignores the stop signal ON
+    # PURPOSE: if it died at 5 s, `timeout` would exit with it and never send the kill, leaving a
+    # driver call that ignores the stop signal holding the pipe open, and the probe waiting on it.
+    # Kept alive, the shell lets the kill at 7 s reach every process `timeout` started. A driver
+    # that fails, hangs or prints prose leaves no parseable line, the box reads unmeasured, and a
+    # task with minimums does not board it.
+    "timeout -k 2 5 sh -c 'trap \"\" TERM; nvidia-smi; echo @CCAP; "
+    "nvidia-smi --query-gpu=compute_cap --format=csv,noheader' "
+    "2>/dev/null | awk '$0==\"@CCAP\"{c=1;next} c{print \"CCAP\", $0;next} "
+    "!v{for(i=2;i<NF;i++)if($(i-1)==\"CUDA\"&&$i==\"Version:\"){print \"CUDAV\", $(i+1);v=1;break}}'; "
     # The HOST's pressure totals, microseconds: time tasks spent waiting for the resource.
     "for r in cpu memory io; do [ -r /proc/pressure/$r ] && "
     "awk -v r=$r '{split($5,a,\"=\");print \"PSI\",r,$1,a[2]}' /proc/pressure/$r 2>/dev/null; done; "
@@ -936,6 +950,21 @@ _PROBE_MAX_CLK_TCK = 100000.0
 _PROBE_MAX_COUNT = float(1 << 53)
 
 
+_PROBE_CUDA_RE = re.compile(r"[0-9]{1,3}\.[0-9]{1,2}\Z")
+_PROBE_CCAP_RE = re.compile(r"([0-9]{1,2})\.([0-9])\Z")
+
+
+def _probe_cuda(tok: str) -> float | None:
+    """Invariant 4j: the driver's CUDA version from nvidia-smi's banner (`12.7`), else None."""
+    return float(tok) if _PROBE_CUDA_RE.match(tok or "") and float(tok) > 0 else None
+
+
+def _probe_compute_cap(tok: str) -> int | None:
+    """Invariant 4j: a card's architecture (`8.9`) in the units Vast publishes it (890), else None."""
+    m = _PROBE_CCAP_RE.match(tok or "")
+    return int(m.group(1)) * 100 + int(m.group(2)) * 10 if m and int(m.group(1)) > 0 else None
+
+
 def _probe_mask(tok: str) -> int | None:
     """The driver's clock-reason bit mask (`0x0000000000000004`), or None when it printed anything
     else: `[N/A]` and `[Not Supported]` are what a card that does not report it answers."""
@@ -967,10 +996,17 @@ def parse_box_probe(text: str) -> dict | None:
     Every invariant-25 field (`cpu_quota_cores`, `cpu_usage_usec`, `mem_limit_gb`, `mem_used_gb`,
     `mem_anon_gb`, `gpu_mem_util`, `gpu_name`, `gpu_count`) is independently optional and defaults to
     None — an older box image, a cgroup layout we don't recognise, or a truncated reply costs only
-    that field. The HOST-basis keys keep their exact pre-25 meaning and units."""
+    that field. The HOST-basis keys keep their exact pre-25 meaning and units.
+
+    `cuda_max_good` and `compute_cap` (invariant 4j) are named and scaled as Vast publishes them on
+    an offer, so `offer_meets_minimums` reads a box and an offer alike. Both optional; a box with
+    several cards reads its weakest, and any `CCAP` line that is not a reading, or a count of
+    them other than the `GPU` line's card count, makes the whole field unmeasured, because a task
+    may land on any of the cards."""
     keyed: dict = {}
     gpu_lines: list = []
     gpux_lines: list = []
+    ccap_lines: list = []
     psi_lines: list = []
     cpus_lines: list = []
     for ln in (text or "").splitlines():
@@ -985,8 +1021,10 @@ def parse_box_probe(text: str) -> dict | None:
             psi_lines.append(parts[1:])
         elif parts[0] == "CPUS":
             cpus_lines.append(parts[1:])
+        elif parts[0] == "CCAP":
+            ccap_lines.append(parts[1:])
         elif parts[0] in ("NPROC", "LOAD", "MEM", "CPUQ", "CPUU", "MEMCG", "MEMANON", "DISK",
-                          "CLKTCK", "NET"):
+                          "CLKTCK", "NET", "CUDAV"):
             keyed.setdefault(parts[0], parts[1:])
     try:
         cores = int(float(keyed["NPROC"][0]))
@@ -1006,7 +1044,9 @@ def parse_box_probe(text: str) -> dict | None:
            "psi": None, "disk_total_gb": None, "disk_free_gb": None,
            # invariant 31f — the machine's CPU time and the worker's network bytes, same standing
            "host_cpu_busy_usec": None, "host_cpu_core_busy_usec": None,
-           "net_rx_bytes": None, "net_tx_bytes": None}
+           "net_rx_bytes": None, "net_tx_bytes": None,
+           # invariant 4j — what a task's minimums are checked against on a box it did not rent
+           "cuda_max_good": None, "compute_cap": None}
     # First PARSEABLE GPU row wins, and the frozen fields stay first-GPU (never a sum) so a
     # multi-GPU box's VRAM gate keeps admitting exactly as it did; `gpu_count` reports the rest.
     parsed_gpus = 0
@@ -1090,6 +1130,13 @@ def parse_box_probe(text: str) -> dict | None:
         tx = _probe_reading(toks[1]) if len(toks) > 1 else None
         out["net_rx_bytes"] = None if rx is None or rx > _PROBE_MAX_COUNT else int(rx)
         out["net_tx_bytes"] = None if tx is None or tx > _PROBE_MAX_COUNT else int(tx)
+    if keyed.get("CUDAV"):
+        out["cuda_max_good"] = _probe_cuda(keyed["CUDAV"][0])
+    # One reading per card the `GPU` line counted: a reply cut off by the timeout can carry fewer,
+    # and the cards it dropped may be the weakest.
+    caps = [_probe_compute_cap(toks[0]) if len(toks) == 1 else None for toks in ccap_lines]
+    if caps and None not in caps and len(caps) == out["gpu_count"]:
+        out["compute_cap"] = min(caps)
     return out
 
 
@@ -1711,11 +1758,42 @@ def is_cpu_targeted(task: dict) -> bool:
     return bool(cpu_name_patterns(task.get("resource_hint")))
 
 
+def instance_meets_minimums(inst: dict | None, resource_hint: dict | None,
+                            unread_passes: bool = False) -> bool:
+    """Invariant 4j, the PACK half: the box probe's reading of the driver's CUDA version and the
+    card's architecture (`parse_box_probe`), against the same minimums and under the same
+    fail-closed rule as an offer. A box whose probe has not answered (a coordinator that has just
+    started, a driver that refuses, no card) reads None and is refused.
+
+    `unread_passes` is for the box rented FOR the task: vetted at rent, it may be boarded before its
+    first probe answers (refusing it then is 4f's regression 2, a rent every poll), so there a None
+    passes. A reading BELOW a minimum refuses even that box: the task would fail its GPU check there.
+
+    WHY. Owned boxes are never rented, so the rent filter never vets them, and before the probe read
+    these two facts a task with minimums could not board one at all. Measured: a job built for CUDA 13
+    without minimums packed onto an owned laptop whose driver runs CUDA 12.7 and failed at its GPU
+    check within a minute, twice; declaring the minimum would have left it no owned box.
+
+    The two reads are spelled out, not looped over `OFFER_MINIMUMS`, so the view-key guard
+    (`test_NO_placement_key_is_missing_from_the_real_view_MECHANICAL`) sees both."""
+    measured = {"cuda_max_good": (inst or {}).get("cuda_max_good"),
+                "compute_cap": (inst or {}).get("compute_cap")}
+    for field, minimum in offer_minimums(resource_hint).items():
+        v = measured[field]
+        if v is None and unread_passes:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < minimum:
+            return False
+    return True
+
+
 def boards_only_its_own_rental(task: dict) -> bool:
-    """Is every box this task did not rent unverifiable for it? True for a CPU-targeted task (4f) and
-    for one that declares offer minimums (4j): the `instances` row records neither the CPU nor the
-    driver, so only the box rented FOR this task — vetted at rent time — is known to qualify."""
-    return is_cpu_targeted(task) or bool(offer_minimums(task.get("resource_hint")))
+    """Is every box this task did not rent unverifiable for it? True for a CPU-targeted task (4f):
+    the `instances` row records no CPU, so only the box rented FOR this task — vetted at rent time —
+    is known to qualify. A task with offer minimums (4j) is not in this set: the box probe reads the
+    driver and the card, so it may also board a box whose reading meets them
+    (`instance_meets_minimums`)."""
+    return is_cpu_targeted(task)
 
 
 def requires_gpu(resource_hint: dict | None) -> bool:
@@ -2021,13 +2099,18 @@ def _boardable(task: dict, instances: list) -> list:
     tgt = box_target(hint)
     if tgt is not None:                       # most specific wins; a box target implies its own CPU
         return [i for i in instances if _box_matches(i, tgt)]
-    # 4j: a task with offer minimums boards only its own rental, as a CPU-targeted task does (4f). A
-    # box target above still wins: naming a machine asserts what it can run, and it is the only way
-    # such a task can use an owned box, whose driver the registry does not record.
-    if not boards_only_its_own_rental(task):
-        return instances
     own = f"runq_{task['id']}"
-    return [i for i in instances if i.get("label") == own]
+    if boards_only_its_own_rental(task):      # 4f: no box records its CPU; 4j still refuses a reading below
+        return [i for i in instances
+                if i.get("label") == own and instance_meets_minimums(i, hint, unread_passes=True)]
+    # 4j: a task with offer minimums boards a box whose probe reading meets them. Its own rental also
+    # passes while unread: that box was vetted at rent, and its first probe may not have answered
+    # when the task comes to board it (4f's regression 2, the rent loop). A box target above still
+    # wins: naming a machine asserts what it can run.
+    if offer_minimums(hint):
+        return [i for i in instances
+                if instance_meets_minimums(i, hint, unread_passes=i.get("label") == own)]
+    return instances
 
 
 def lane_capacity(offer: dict, resource_hint: dict | None, settings: dict) -> int:
@@ -2251,7 +2334,7 @@ def place(task: dict, instances: list, offers: list, queue: list, settings: dict
                 # 4h, the rent half of the GPU requirement whose pack half lives in `_boardable`.
                 # Guarding only one path is incident 1 of `_boardable`, replayed on a different axis.
                 and gpu_allowed(o, task.get("resource_hint"))
-                # 4j, the rent half; the pack half is `boards_only_its_own_rental` in `_boardable`.
+                # 4j, the rent half; the pack half is `instance_meets_minimums` in `_boardable`.
                 and offer_meets_minimums(o, task.get("resource_hint"))
                 and slots_for_offer(o, task.get("resource_hint"), settings) >= min_slots]
 
@@ -8021,6 +8104,10 @@ class Dispatcher:
                 # Measured GPU memory (invariant 22); None until first sampled -> VRAM gate falls
                 # back to slot-count (invariant 21c).
                 "vram_total_gb": res.get("vram_total_gb"), "vram_used_gb": res.get("vram_used_gb"),
+                # Invariant 4j's pack half (`instance_meets_minimums`): the driver's CUDA version and
+                # the card's architecture as the probe read them. None until the box's first full
+                # probe answers, and a box that reads None is refused to a task with minimums.
+                "cuda_max_good": res.get("cuda_max_good"), "compute_cap": res.get("compute_cap"),
                 # The FULL measurement (invariant 23: cores/load1/RAM/VRAM/gpu_util + `at`), which
                 # `box_headroom` turns into real spare capacity. Empty dict -> falsy -> gate abstains.
                 "measured": res or None,
