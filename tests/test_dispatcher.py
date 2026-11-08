@@ -3098,6 +3098,57 @@ class TestFailedPullsRunLogTraceback:
         # (4) the task still lands terminal task_failed (the tail is additive, not gating)
         assert dict(d.conn.execute("SELECT * FROM tasks WHERE id='TF'").fetchone())["state"] == "task_failed"
 
+    def test_pulls_row_files_after_the_reports_before_the_box_copy_is_deleted(self, tmp_path):
+        """Regression: a two-step job's first step ran 2.7 h and wrote its per-item `*.jsonl` rows;
+        the second step ran out of memory. The failure pull took only `*.log` / `*.json`, then the
+        box copy was deleted, so the rows were lost. The job contract brings `*.jsonl` home when a
+        task finishes; a failure is a finish. Their own pull, after the small files."""
+        d, reg, task, inst = self._seed_running(tmp_path)
+        local_out = d._result_dir(task)
+        events = []
+
+        def fake_rsync_pull(host, port, remote, dest, includes, append=False, run=None):
+            events.append(("pull", remote, tuple(includes)))
+            return True
+
+        d._alert = lambda m: None
+        d._gc_box_task_dir = lambda task, host, port, why: events.append(("gc", why))
+        orig = disp.rsync_pull
+        disp.rsync_pull = fake_rsync_pull
+        try:
+            d._complete_failed(task, inst, "example.com", 2222, "FAILED_1")
+        finally:
+            disp.rsync_pull = orig
+            import shutil
+            shutil.rmtree(local_out, ignore_errors=True)
+
+        reports = ("pull", "~/spool/active/TF/out/", ("*.log", "*.json"))
+        rows = ("pull", "~/spool/active/TF/out/", ("*.jsonl",))
+        assert reports in events and rows in events
+        assert events.index(reports) < events.index(rows) < events.index(("gc", "task_failed"))
+        assert dict(d.conn.execute("SELECT * FROM tasks WHERE id='TF'").fetchone())["state"] == "task_failed"
+
+    def test_a_full_local_disk_on_the_row_pull_defers_the_failure(self, tmp_path):
+        """free-space-guard inv. 6 covers the row pull too: our disk refused the rows, and the CAS
+        would end with the box copy deleted, so the task waits for a cycle that can hold them."""
+        d, reg, task, inst = self._seed_running(tmp_path)
+        local_out = d._result_dir(task)
+        d._alert = lambda m: None
+        gcs = []
+        d._gc_box_task_dir = lambda task, host, port, why: gcs.append(why)
+        orig = disp.rsync_pull
+        disp.rsync_pull = lambda host, port, remote, dest, includes, append=False, run=None: (
+            disp.LOCAL_DISK_FULL if tuple(includes) == ("*.jsonl",) else True)
+        try:
+            d._complete_failed(task, inst, "example.com", 2222, "FAILED_1")
+        finally:
+            disp.rsync_pull = orig
+            import shutil
+            shutil.rmtree(local_out, ignore_errors=True)
+
+        assert dict(d.conn.execute("SELECT * FROM tasks WHERE id='TF'").fetchone())["state"] == "running"
+        assert gcs == []
+
     def test_missing_run_log_degrades_to_bare_exit_reason(self, tmp_path):
         """A failed/absent run.log pull must never block the task_failed CAS — the tail is simply
         empty and the reason falls back to the old bare `worker exit <rc>` (+ zero-progress label)."""

@@ -7147,6 +7147,14 @@ class Dispatcher:
         local_out = self._result_dir(task)
         got_out = rsync_pull(host, port, f"~/spool/active/{task['id']}/out/", str(local_out) + "/",
                               ["*.log", "*.json"], run=self.run)
+        # Row files (`*.jsonl`) written by the steps that finished before the failure: the job
+        # contract brings `*.jsonl` home when a task finishes, and the box copy is deleted below, so
+        # a pull that skips them destroys completed work. Measured: a two-step job's first step ran
+        # 2.7 h and wrote its per-item rows, the second step ran out of memory, and only the step's
+        # summary `.json` came home. Their own pull, AFTER the small files, so a large row file that
+        # outruns the transfer budget cannot hold up the reports (rsync sends in name order).
+        got_rows = rsync_pull(host, port, f"~/spool/active/{task['id']}/out/", str(local_out) + "/",
+                               ["*.jsonl"], run=self.run)
         # The trainer's stdout+stderr -- the actual crash traceback -- is captured by the box worker
         # to `active/<id>/run.log` (spool_worker.py), a SIBLING of `out/` one level ABOVE it, so the
         # `out/`-rooted pull above (and every other ingest pull) structurally can never reach it: an
@@ -7162,7 +7170,7 @@ class Dispatcher:
         # yields an empty tail and the old bare-exit reason -- never blocks the task_failed CAS.
         got_log = rsync_pull(host, port, f"~/spool/active/{task['id']}/", str(local_out) + "/",
                               ["run.log"], run=self.run)
-        if got_out is LOCAL_DISK_FULL or got_log is LOCAL_DISK_FULL:
+        if LOCAL_DISK_FULL in (got_out, got_rows, got_log):
             # free-space-guard inv. 6. "Best-effort" above is about a box we cannot reach. Here the
             # box answered and OUR disk refused the forensics, and the CAS below ends with
             # `_gc_box_task_dir` deleting the only other copy — so wait for a cycle that can hold

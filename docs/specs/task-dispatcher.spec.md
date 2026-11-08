@@ -1301,7 +1301,14 @@ checkpoint write, so no trainer changes are needed and no progress is thrown awa
       missing artifact triggers ONE retry pull before that decision** (dispatcher.py:1276-1284):
       a transient transport failure (box torn down mid-pull, ssh drop) can return `ok=False` even
       after the artifact itself transferred, so artifact PRESENCE — not the transport exit code —
-      is the completion proof. `FAILED_<rc>` → pull logs, → `task_failed`. **The "logs" pull MUST
+      is the completion proof. `FAILED_<rc>` → pull logs, → `task_failed`. **The failure pull also
+      brings home `out/*.jsonl`**, in its own pull after the `*.log` / `*.json` one (rsync sends in
+      name order, so a large row file that outruns the budget cannot hold up the reports): the job
+      contract brings `*.jsonl` home when a task finishes, and inv. 29a deletes the box copy right
+      after, so a multi-step job whose later step fails would otherwise lose the rows its finished
+      steps wrote (measured: a 2.7 h evaluation step's per-item rows, lost when the next step ran
+      out of memory). A full local disk on that pull defers the failure like the others
+      (free-space-guard inv. 6). **The "logs" pull MUST
       include the trainer's captured stdout+stderr `run.log`, which the box worker writes to
       `active/<id>/run.log` — a SIBLING of `out/`, one level ABOVE it** (`spool_worker.py`). Every
       other ingest pull is rooted at `active/<id>/out/`, and an rsync `--include` can only match

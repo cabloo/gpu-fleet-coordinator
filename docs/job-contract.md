@@ -88,7 +88,8 @@ and appends `--out <directory>`.
 | when | what |
 |---|---|
 | while the job runs | `ckpt_latest.pt` (and its spare `ckpt_latest.pt.prev`), and everything under `tb/` |
-| when it finishes | the completion artifact, `*.json`, `*.jsonl`, `*.log`, `ckpt_*.pt`, and everything under `tb/`, at any depth |
+| when it ends `done` | the completion artifact, `*.json`, `*.jsonl`, `*.log`, `ckpt_*.pt`, and everything under `tb/`, at any depth |
+| when it fails | `*.json`, `*.jsonl` and `*.log` at the top of the directory, and the worker's `run.log` |
 
 Everything else is deleted with the box's copy of the task. A `model.pt`, a `metrics.csv` or a
 `plot.png` is lost. Name what you want kept to match one of the patterns.
